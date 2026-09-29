@@ -1,0 +1,4 @@
+numpy
+scipy
+# optional: faster plane fitting, the built-in sample frame, and the --show 3D viewer
+open3d
