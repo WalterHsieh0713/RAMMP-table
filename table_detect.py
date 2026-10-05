@@ -48,6 +48,15 @@ MARGIN = 0.02         # m, gap kept between the bowl and objects on the table
 EDGE_MARGIN = 0.08    # m, gap kept between the bowl and the table edge
 CELL_SIZE = 0.005     # m, top-down grid resolution (5 mm squares)
 
+# Floor rejection - a plane that fails either check is never picked as the table.
+# At the scan pose the tabletop is ~0.49 m from the camera (distance along the plane
+# normal, measured on robot_depth.png); the floor is a whole table height further.
+TABLE_DIST = 0.49                     # m, camera-to-table distance at the scan pose
+MAX_PLANE_DIST = TABLE_DIST + 0.30    # m, planes farther than this are skipped
+MIN_TABLE_HEIGHT = 0.0   # m, lowest allowed table height in the arm base frame; needs the
+                         # camera pose (TF or place_bowl.py's FK). The table measured 0.135 m
+                         # above the arm base (2026-10-04); the floor is far below 0. None = off.
+
 # Open3D is optional: nicer/faster plane fitting, image loading and a 3D viewer.
 # Without it (e.g. hard to install on the Jetson) we fall back to NumPy.
 try:
@@ -185,17 +194,49 @@ def find_planes(points, max_planes=6, dist_thresh=0.02, min_inliers=1500, iterat
     return planes
 
 
-def pick_table(planes, up=(0.0, -1.0, 0.0), max_tilt_deg=40.0, verbose=True):
+def drop_low_planes(planes, points, cam_to_base, min_height, verbose=True):
+    """Skip planes whose points sit below min_height in the base frame (the floor).
+
+    cam_to_base is (R, t) taking camera-frame points into the base frame, whose
+    +z is up. Each plane's height is the median base-frame z of its points.
+    """
+    R, t = cam_to_base
+    kept = []
+    for model, idx in planes:
+        height = float(np.median(points[idx] @ R[2] + t[2]))
+        if height >= min_height:
+            kept.append((model, idx))
+        elif verbose:
+            print(f"  plane: {len(idx):6d} pts at z={height:.2f} m -> below the "
+                  f"{min_height:.2f} m minimum, skipped (floor?)")
+    return kept
+
+
+def pick_table(planes, up=(0.0, -1.0, 0.0), max_tilt_deg=40.0, max_dist=None, verbose=True):
     """Choose the table among the planes.
 
     - "Horizontal" = normal within max_tilt_deg of the up direction.
       In a camera frame +Y points down, so up is roughly -Y. On the robot you
       should use the real up direction from TF (base_link z-axis) instead.
-    - Among horizontal planes, the table is the one closest to the camera
-      (smallest distance along its normal) - the floor is farther away.
+    - Among horizontal planes, the table is the biggest one. (Not the closest:
+      the flat top of a box on the table is closer and would win. The floor is
+      kept out by max_dist here and min_height in drop_low_planes.)
     - If up is None (no TF available), just take the biggest plane. That works
       when the camera is pointed at the table.
+    - Planes more than max_dist from the camera are skipped first, so the floor
+      can't win even when it is the biggest plane in view.
     """
+    if max_dist is not None:
+        near = []
+        for model, idx in planes:
+            dist_to_camera = abs(model[3]) / np.linalg.norm(model[:3])
+            if dist_to_camera <= max_dist:
+                near.append((model, idx))
+            elif verbose:
+                print(f"  plane: {len(idx):6d} pts, {dist_to_camera:.2f} m from camera "
+                      f"-> farther than {max_dist:.2f} m, skipped (floor?)")
+        planes = near
+
     if up is None:
         if not planes:
             return None
@@ -212,7 +253,7 @@ def pick_table(planes, up=(0.0, -1.0, 0.0), max_tilt_deg=40.0, verbose=True):
         if verbose:
             print(f"  plane: {len(idx):6d} pts, tilt {tilt:5.1f} deg, "
                   f"{dist_to_camera:.2f} m from camera -> {'horizontal' if horizontal else 'not horizontal'}")
-        if horizontal and (best is None or dist_to_camera < best[2]):
+        if horizontal and (best is None or len(idx) > len(best[1])):
             best = (model, idx, dist_to_camera)
     return best
 
@@ -291,7 +332,7 @@ def view_center_on_plane(model, fallback):
 def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS,
                       margin=MARGIN, cell_size=CELL_SIZE, edge_margin=EDGE_MARGIN,
                       surface_tol=0.02, obstacle_range=(0.01, 0.40),
-                      points=None, pixels=None):
+                      points=None, pixels=None, allowed=None):
     """The worker behind find_placement().
 
     Returns (placement_or_None, reason, obstacle_mask). The mask comes back even
@@ -372,6 +413,15 @@ def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS
     fits_edge = free & (dist_edge >= need_edge)
     fits_obstacle = free & (dist_obstacle >= need_obstacle)
     valid = fits_edge & fits_obstacle
+    if allowed is not None and valid.any():
+        # Caller's extra rule (e.g. "the arm can reach it"), on camera-frame cell centres.
+        ja, jb = np.nonzero(valid)
+        centres = origin + (a0 + (ja[:, None] + 0.5) * cell) * ex + (b0 + (jb[:, None] + 0.5) * cell) * ey
+        keep = np.asarray(allowed(centres), dtype=bool)
+        if not keep.any():
+            return None, "the clear spots are all outside the allowed area (e.g. out of reach)", obstacle_mask
+        valid = np.zeros_like(valid)
+        valid[ja[keep], jb[keep]] = True
     if not valid.any():
         if not fits_edge.any():
             best = float(np.where(free, dist_edge, 0).max())
@@ -437,7 +487,8 @@ def find_placement(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS, m
 
 def detect_table(depth_m, intrinsics, up=(0.0, -1.0, 0.0), verbose=False, fast=False,
                  bowl_radius=BOWL_RADIUS, margin=MARGIN, cell_size=CELL_SIZE,
-                 edge_margin=EDGE_MARGIN, placement=True):
+                 edge_margin=EDGE_MARGIN, placement=True, max_plane_dist=None,
+                 cam_to_base=None, min_height=None, allowed=None):
     """Whole pipeline in one call. Used by both this script and the ROS node.
 
     Returns None if no table, else a dict with:
@@ -452,6 +503,10 @@ def detect_table(depth_m, intrinsics, up=(0.0, -1.0, 0.0), verbose=False, fast=F
       obstacle_mask    - HxW bool, pixels of the things standing on the table
     fast=True trades a little accuracy for ~4x speed.
     placement=False skips the free-space search.
+    max_plane_dist (m) skips planes farther than that from the camera.
+    min_height (m) skips planes below that height in the base frame; it needs
+    cam_to_base = (R, t) and is ignored without it.
+    allowed(points Nx3, camera frame) -> bool mask limits where the bowl may go.
     """
     # fast=True: sample every 4th pixel and do fewer RANSAC tries (for the Jetson).
     stride = 4 if fast else 2
@@ -460,7 +515,9 @@ def detect_table(depth_m, intrinsics, up=(0.0, -1.0, 0.0), verbose=False, fast=F
                          iterations=300 if fast else 1000)
     if verbose:
         print("Planes found:")
-    table = pick_table(planes, up=up, verbose=verbose)
+    if min_height is not None and cam_to_base is not None:
+        planes = drop_low_planes(planes, points, cam_to_base, min_height, verbose=verbose)
+    table = pick_table(planes, up=up, max_dist=max_plane_dist, verbose=verbose)
     if table is None:
         return None
     model, _, dist = table
@@ -481,7 +538,7 @@ def detect_table(depth_m, intrinsics, up=(0.0, -1.0, 0.0), verbose=False, fast=F
         spot, reason, obstacles = _placement_search(
             depth_m, intrinsics, result, bowl_radius=bowl_radius, margin=margin,
             cell_size=cell_size, edge_margin=edge_margin,
-            points=full_points, pixels=full_pixels)
+            points=full_points, pixels=full_pixels, allowed=allowed)
         result["placement"] = spot
         result["placement_reason"] = reason
         result["obstacle_mask"] = obstacles
@@ -593,13 +650,18 @@ def main():
     parser.add_argument("--largest-plane", action="store_true",
                         help="skip the 'horizontal' check and take the biggest plane "
                              "(use for wrist-camera frames looking down at the table)")
+    parser.add_argument("--max-plane-dist", type=float, default=MAX_PLANE_DIST,
+                        help="skip planes farther than this from the camera, in m "
+                             f"(default {MAX_PLANE_DIST:.2f}; ignored on the sample frame)")
     args = parser.parse_args()
 
     if args.color and args.depth:
         intr = dict(fx=args.fx, fy=args.fy, cx=args.cx, cy=args.cy)
         color, depth_m, intr = load_frame(args.color, args.depth, args.depth_scale, intr)
+        max_plane_dist = args.max_plane_dist
     else:
         color, depth_m, intr = load_sample_frame()
+        max_plane_dist = None  # the sample's desk is farther away than our robot's table
 
     points, _ = backproject(depth_m, **intr, stride=2)
     print(f"Image {color.shape[1]}x{color.shape[0]}, {len(points)} valid 3D points")
@@ -607,7 +669,7 @@ def main():
 
     up = None if args.largest_plane else (0.0, -1.0, 0.0)
     # Bowl size and the safety gaps are fixed at the top of this file.
-    result = detect_table(depth_m, intr, up=up, verbose=True)
+    result = detect_table(depth_m, intr, up=up, verbose=True, max_plane_dist=max_plane_dist)
     if result is None:
         print("No table found.")
         return

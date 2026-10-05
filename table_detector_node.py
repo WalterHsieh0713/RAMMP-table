@@ -33,7 +33,8 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker
 
-from table_detect import depth_to_color, detect_table, overlay_image, plane_axes
+from table_detect import (MAX_PLANE_DIST, MIN_TABLE_HEIGHT, depth_to_color, detect_table,
+                          overlay_image, plane_axes)
 
 
 def image_to_numpy(msg):
@@ -71,6 +72,12 @@ class TableDetector(Node):
         self.declare_parameter("color_topic", "/camera/wrist/color/image_raw")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("rate_hz", 2.0)
+        # Floor rejection. max_plane_dist: planes farther than this from the camera
+        # (m) are never the table. min_table_height: planes lower than this in
+        # base_frame (m) are never the table; needs TF, NaN = off.
+        self.declare_parameter("max_plane_dist", MAX_PLANE_DIST)
+        self.declare_parameter("min_table_height",
+                               float("nan") if MIN_TABLE_HEIGHT is None else MIN_TABLE_HEIGHT)
         # The free-space search (bowl size, safety gaps, grid resolution) is fixed
         # at the top of table_detect.py - edit it there, not here.
 
@@ -142,7 +149,11 @@ class TableDetector(Node):
         cam_to_base = self._camera_to_base(depth_msg.header.frame_id)
         up = None if cam_to_base is None else cam_to_base[0].T @ np.array([0.0, 0.0, 1.0])
 
-        result = detect_table(depth_m, intr, up=up, fast=True)
+        min_height = self.get_parameter("min_table_height").value
+        result = detect_table(depth_m, intr, up=up, fast=True,
+                              max_plane_dist=self.get_parameter("max_plane_dist").value,
+                              cam_to_base=cam_to_base,
+                              min_height=None if np.isnan(min_height) else min_height)
         if result is None:
             self.get_logger().info("No table in view", throttle_duration_sec=2.0)
             self._publish_overlay(depth_msg, depth_m, np.zeros(depth_m.shape, bool), intr)
