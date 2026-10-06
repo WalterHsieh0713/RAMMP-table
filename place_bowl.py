@@ -10,6 +10,12 @@ Two separate steps (the held bowl would block the wrist camera, so the table is 
     python3 place_bowl.py place --execute       # do it ([ENTER] before moving and before letting go)
     python3 place_bowl.py place --here --execute   # skip the spot: lower straight down from where it is
 
+A target given by hand instead of `look` (no camera; you keep the target clear):
+    python3 place_bowl.py mark                  # fingertip touching the target -> saved as the spot
+    python3 place_bowl.py place --at X Y [--table-z Z] [--execute]   # bowl centre at X, Y (m)
+  X, Y, Z are in the level frame: origin on the arm base axis, x/y the arm base's (x forward, y left,
+  as the Kinova base is marked) turned only by the mount tilt, z true up. `mark` prints them.
+
 From Python:  spot = choose_spot();  if spot: place_at(spot, execute=True)
 
 look
@@ -1122,6 +1128,32 @@ def place_at(spot, execute=False, **options):
     place(ARGS, record=spot)
 
 
+def manual_spot(x, y, table_z, up_base, source):
+    """A spot record for a target given by hand (`mark`, `place --at`) instead of found by `look`.
+    x, y: bowl centre, table_z: table height, all in the level frame (m). Confirmed: a person chose it."""
+    return dict(time=time.time(), time_str=time.strftime("%Y-%m-%d %H:%M:%S"), x=float(x), y=float(y),
+                table_z=float(table_z), frame="level", confirmed=True, source=source,
+                spot=[float(x), float(y), float(table_z)], up_base=np.asarray(up_base, dtype=float).tolist())
+
+
+def mark(args):
+    """Save where the fingertip is now as the spot: touch the target on the table with it first."""
+    try:
+        arm = connect_arm()
+    except OSError as e:
+        sys.exit(f"Cannot reach arm_server ({e}).")
+    model = ArmModel()
+    q = np.asarray(wait_still(arm)["position"], dtype=float)
+    tip = model.fk(q, "finger_tip")[:3, 3]
+    record = manual_spot(tip[0], tip[1], tip[2], model.up_base, "mark")
+    print(f"fingertip at x={tip[0]:.3f} y={tip[1]:.3f} z={tip[2]:.3f} m (level frame), "
+          f"{np.hypot(*tip[:2]):.2f} m from the base axis")
+    SPOT_DIR.mkdir(parents=True, exist_ok=True)
+    SPOT_FILE.write_text(json.dumps(record, indent=2))
+    print(f"saved {SPOT_FILE}: the bowl centre goes here, table height {tip[2]:.3f} m.\n"
+          f"Same spot later: place --at {tip[0]:.3f} {tip[1]:.3f} --table-z {tip[2]:.3f}")
+
+
 def check_spot(record, max_age, require_confirmed=True):
     """Exit with the reason if a saved spot must not be used."""
     age_min = (time.time() - record["time"]) / 60
@@ -1154,6 +1186,14 @@ def place(args, record=None):
                      f"~{np.sin(np.radians(tilt)) * 100:.0f}% of its weight. Use touch sensing (no --impedance).")
     if args.here:
         record = None
+    elif args.at is not None:
+        table_z = args.table_z
+        if table_z is None:
+            if not SPOT_FILE.exists():
+                sys.exit("--at needs the table height: pass --table-z, or run `mark` or `look` once first.")
+            table_z = json.loads(SPOT_FILE.read_text())["table_z"]
+            print(f"table height {table_z:.3f} m, from the last saved spot")
+        record = manual_spot(args.at[0], args.at[1], table_z, model.up_base, "at")
     else:
         if record is None:
             if not SPOT_FILE.exists():
@@ -1184,7 +1224,12 @@ def place(args, record=None):
         moves, descent, info = plan_place(model, q_now, record, here=args.here, max_drop=args.max_drop,
                                           bowl_depth=args.bowl_depth, max_adjust=args.max_adjust,
                                           impedance=args.impedance)
-        if record is not None:
+        if record is not None and record.get("source") in ("mark", "at"):
+            r = float(np.hypot(*record["spot"][:2]))
+            print(f"target given by hand, {r:.2f} m from the base axis -- no obstacle check, keep it clear"
+                  + ("" if REACH_BAND[0] <= r <= REACH_BAND[1] else
+                     f" (outside the swept reach {REACH_BAND[0]:.2f}-{REACH_BAND[1]:.2f}; the plan decides)"))
+        elif record is not None:
             obstacles = np.load(OBSTACLE_FILE) if OBSTACLE_FILE.exists() else np.zeros((0, 3))
             blocked = corridor_obstacles(obstacles, np.asarray(record["spot"]), record["table_z"],
                                          info["approach"])
@@ -1294,11 +1339,18 @@ def build_parser():
                         help="skip planes farther than this from the camera, m (default %(default).2f)")
     p_level = sub.add_parser("level", help="record true up: hold the hand truly level, camera on the right")
     p_level.add_argument("--clear", action="store_true", help="forget it (base z = up again)")
+    sub.add_parser("mark", help="save the fingertip's position as the spot: touch the target on the "
+                                "table with the fingertip first (no motion)")
     p_place = sub.add_parser("place", help="put the held bowl down (dry run unless --execute)")
     p_place.add_argument("--execute", action="store_true", help="actually move")
     p_place.add_argument("--yes", action="store_true", help="skip the [ENTER] prompts")
     p_place.add_argument("--here", action="store_true",
                          help="no spot: adjust, then lower straight down from where the hand is")
+    p_place.add_argument("--at", type=float, nargs=2, metavar=("X", "Y"),
+                         help="place the bowl centre here instead of the saved spot: level frame, m "
+                              "(origin on the arm base axis, x forward, y left; `mark` prints them)")
+    p_place.add_argument("--table-z", type=float,
+                         help="--at: table height, m (default: from the last saved spot)")
     p_place.add_argument("--max-drop", type=float, default=MAX_DROP,
                          help="--here: lowest the lowering may go below the start, m (default %(default).2f)")
     p_place.add_argument("--steps", action="store_true",
@@ -1322,7 +1374,7 @@ def main():
     global ARGS
     ARGS = build_parser().parse_args()
     ARGS.yes = getattr(ARGS, "yes", False)
-    {"look": look, "level": level, "place": place}[ARGS.cmd](ARGS)
+    {"look": look, "level": level, "mark": mark, "place": place}[ARGS.cmd](ARGS)
 
 
 ARGS = None

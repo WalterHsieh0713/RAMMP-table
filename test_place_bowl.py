@@ -150,6 +150,15 @@ def test_refuses_a_big_turn_with_the_bowl_in_hand():
         raise AssertionError("a 90 deg turn with the bowl in hand was not refused")
 
 
+def test_a_target_given_by_hand_plans_like_a_looked_one():
+    args = P.build_parser().parse_args(["place", "--at", "0.85", "-0.1", "--table-z", str(TABLE_Z)])
+    assert args.at == [0.85, -0.1] and args.table_z == TABLE_Z and not args.execute
+    record = P.manual_spot(*args.at, args.table_z, P.load_mount()[1], "at")
+    assert record["confirmed"] and record["spot"] == [0.85, -0.1, TABLE_Z]
+    P.check_spot(record, max_age=P.MAX_AGE_MIN)     # fresh, confirmed, current level -> accepted
+    P.plan_place(MODEL, holding_pose(np.array(record["spot"])), record)
+
+
 def sweep():
     """Bowl-centre distances (from the arm base axis) where the whole place plans."""
     for yaw in (0, 45, -45, 90):

@@ -12,7 +12,7 @@ Nothing outside this folder is changed.
 | `scan_and_detect.sh` | Scan pose, then detector + overlay viewer, one command. |
 | `save_frame.py` | Saves one depth/color frame and prints the intrinsics. |
 | `test_placement.py` | Offline tests: `python3 test_placement.py`. |
-| `place_bowl.py` | `look` (find + save a reachable spot) and `place` (bowl already gripped: square the hand, carry, lower with joint-space impedance, release). Dry run unless `--execute`. |
+| `place_bowl.py` | `look` (find + save a reachable spot) and `place` (bowl already gripped: square the hand, carry, lower until it touches, release). Dry run unless `--execute`. A target given by hand instead: `mark` (fingertip on the target) or `place --at X Y`. |
 | `test_place_bowl.py` | Offline tests for the planner; `--sweep` maps where the arm can place. |
 | `spot_vote.py` | `look`'s several-scan vote: drop outlying spots, average the rest, check the average is clear, and the Confirm / Rescan / Cancel window (terminal prompt without a display). |
 | `test_spot_vote.py` | Offline tests for it, no pybullet needed; `--show` opens the window on a synthetic scan. |

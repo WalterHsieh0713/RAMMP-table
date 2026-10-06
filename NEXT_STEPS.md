@@ -1,6 +1,24 @@
-# What to do next (updated 2026-10-05)
+# What to do next (updated 2026-10-06)
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`. The design of the several-scan `look`: `PLAN_2026-10-05.md`.
+**New direction (2026-10-06):** the scan moves to a scene camera behind the joystick, and the user picks the spot in the UI. See `PLAN_2026-10-06_scene_camera.md`. HERL test on Thursday 2026-10-08.
+
+## Now: short video of placing at a given target (no camera needed)
+New on 2026-10-06, offline only (not run on the arm yet; the tests weren't run either, because Windows has no numpy):
+- **`place_bowl.py mark`:** saves where the fingertip is as the spot (level frame; the table height is the fingertip's height). Nothing moves.
+- **`place_bowl.py place --at X Y [--table-z Z]`:** places the bowl centre at typed coordinates (m, level frame: origin on the arm base axis, x forward, y left, z true up). Without `--table-z`, it uses the last saved spot's height.
+- Hand-given targets skip the obstacle check (keep the area clear) and warn when they're outside `REACH_BAND`.
+
+Steps (arm stack running as in section 1 below):
+- [ ] `python3 test_place_bowl.py`: must pass, including the new `test_a_target_given_by_hand_plans_like_a_looked_one`.
+- [ ] Put a tape X on the table about 0.85 m from the arm base.
+- [ ] Empty gripper, **closed**, hand pointing down: jog the arm (web app, or the wrist button) until the fingertips just touch the X. Then `python3 place_bowl.py mark` (it prints x, y, z).
+- [ ] Lift away, open the gripper, grip the bowl by its lip (hand level, camera on the right).
+- [ ] `python3 place_bowl.py place` (plan only), then `place --execute`. **Record this part**: the bowl should land centred on the X.
+- [ ] Optional second take: move the tape, then `place --at X Y` with typed numbers.
+- [ ] If the bowl lands consistently 1–2 cm off the X: that's the fingertip-length question in section 2 (the model says 18.0 cm, not yet measured).
+- [ ] Check once that x is forward and y is left: `mark` at a point you know.
+- The spot is refused after 30 min (`--max-age`), so mark and place in one session.
 
 ## Done on 2026-10-05, offline only (not run on the arm yet, not committed)
 - **`look` scans several times, averages, and asks before saving** (`spot_vote.py`, `place_bowl.py`):
