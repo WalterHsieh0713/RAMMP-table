@@ -3,18 +3,25 @@
 Two separate steps (the held bowl would block the wrist camera, so the table is looked at first):
 
     python3 place_bowl.py level                 # once per mounting: hand held truly level -> true "up"
-    python3 place_bowl.py look                  # gripper empty, arm at the scan pose: find + save the spot
+    python3 place_bowl.py look                  # gripper empty, arm at the scan pose: find the spot,
+                                                # click Confirm (or Rescan / Cancel) -> saved
     (grip the bowl by its lip: hand level, camera on the right seen from behind)
     python3 place_bowl.py place                 # dry run: plan + check everything, nothing moves
     python3 place_bowl.py place --execute       # do it ([ENTER] before moving and before letting go)
     python3 place_bowl.py place --here --execute   # skip the spot: lower straight down from where it is
 
+From Python:  spot = choose_spot();  if spot: place_at(spot, execute=True)
+
 look
-  One depth frame from the wrist camera. The camera pose comes from the arm's joint angles
-  (forward kinematics on the repo URDF) + the saved hand-eye calibration, so no TF is needed.
-  table_detect finds the table (floor rejected by height and distance) and a clear spot the arm
-  can reach; the spot, the table height and the obstacle points are saved to ~/.table_place/ in
-  arm_base_link. Nothing moves.
+  --frames (10) depth frames from the wrist camera, --period (0.2 s) apart. The camera pose comes
+  from the arm's joint angles (forward kinematics on the repo URDF) + the saved hand-eye
+  calibration, so no TF is needed. In each frame table_detect finds the table (floor rejected by
+  height and distance) and a clear spot the arm can reach. spot_vote drops the outlying spots and
+  averages the rest, then checks the average is still clear (two clusters can average onto an
+  object). A window shows every frame's spot and the result: Confirm saves the spot, the table
+  height and the obstacle points to ~/.table_place/ (level frame), with confirmed: true; `place`
+  refuses a spot without it (--no-confirm overrides). No display (plain ssh): --no-window, or it
+  asks in the terminal and the picture is in ~/.table_place/overlay.png. Nothing moves.
 
 place  (starts with the bowl already gripped by its lip)
   1. adjust   : turn the hand in place to EXACTLY level + rolled 90 deg (camera on the right of
@@ -64,6 +71,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -71,20 +79,24 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
-# This rig (rchi-cpu-5) runs arm_server locally -- no NUC. arm_interface reads
-# ARM_RPC_HOST at import time, so default it here; export it to override.
-os.environ.setdefault("ARM_RPC_HOST", "127.0.0.1")
-
-from table_detect import (BOWL_RADIUS, EDGE_MARGIN, MAX_PLANE_DIST, MIN_TABLE_HEIGHT, backproject,  # noqa: E402
-                          depth_to_color, detect_table, overlay_image, write_image)
+from arm_backend import connect_arm  # (which arm stack: TABLE_ARM_BACKEND)
+from spot_vote import ask, combine_spots, confirm_image, grid_clearance
+from table_detect import (BOWL_RADIUS, EDGE_MARGIN, MARGIN, MAX_PLANE_DIST, MIN_TABLE_HEIGHT,
+                          backproject, depth_to_color, detect_table, overlay_image, plane_axes,
+                          write_image)
 
 HERE = Path(__file__).resolve().parent
+# Per-machine paths: the defaults fit rchi-cpu-5; on another machine (e.g. the Jetson) export
+# TABLE_URDF / TABLE_CALIB / TABLE_STATE_DIR / TABLE_CAMERA_NS instead of editing them here.
 # The repo URDF: next to this folder when it lives inside feeding-deployment, else the lab checkout.
 _URDF = Path("src") / "feeding_deployment" / "assets" / "robot" / "robot.urdf"
-ROBOT_URDF = next((p for p in (HERE.parent / _URDF, Path.home() / "feeding-deployment" / _URDF)
-                   if p.exists()), HERE.parent / _URDF)
-CALIB_FILE = Path.home() / ".ros2" / "easy_handeye2" / "calibrations" / "wrist_camera_calib.calib"
-SPOT_DIR = Path.home() / ".table_place"
+ROBOT_URDF = Path(os.environ["TABLE_URDF"]) if "TABLE_URDF" in os.environ else next(
+    (p for p in (HERE.parent / _URDF, Path.home() / "feeding-deployment" / _URDF) if p.exists()),
+    HERE.parent / _URDF)
+CALIB_FILE = Path(os.environ.get(
+    "TABLE_CALIB", Path.home() / ".ros2" / "easy_handeye2" / "calibrations" / "wrist_camera_calib.calib"))
+CAMERA_NS = os.environ.get("TABLE_CAMERA_NS", "/camera/wrist")
+SPOT_DIR = Path(os.environ.get("TABLE_STATE_DIR", Path.home() / ".table_place"))
 SPOT_FILE = SPOT_DIR / "spot.json"
 OBSTACLE_FILE = SPOT_DIR / "obstacles.npy"
 MOUNT_FILE = SPOT_DIR / "mount.json"   # true "up" in the arm base frame (`place_bowl.py level`)
@@ -149,6 +161,8 @@ MAX_SAG = 0.02          # m, hand drop allowed when compliant mode takes over
 COMPLIANT_LIMITS = {1: 2.24 - np.radians(15), 3: 2.57 - np.radians(15)}   # J2, J4
 
 # --- look ---
+LOOK_FRAMES = 10        # frames scanned and averaged (>= 5 for the outlier vote to mean much)
+LOOK_PERIOD = 0.2       # s between them
 SELF_RADIUS = 0.10      # m, depth points this close to our own gripper are the gripper
 HAND_HALF_WIDTH = 0.07  # m, half-width of the strip the hand + wrist come down through
 HAND_BEHIND = 0.20      # m, the hand + wrist reach this far behind the tool frame
@@ -629,18 +643,8 @@ def retreat_poses(ee_pos, R_wb=np.eye(3)):
 
 
 # ---------------------------------------------------------------------------
-# Arm server + camera
+# Arm + camera (connect_arm comes from arm_backend.py)
 # ---------------------------------------------------------------------------
-
-def connect_arm():
-    """The arm_server proxy, or raise OSError if it isn't running."""
-    from feeding_deployment.control.robot_controller.arm_interface import (
-        ARM_RPC_PORT, NUC_HOSTNAME, RPC_AUTHKEY, ArmManager)
-    ArmManager.register("ArmInterface")
-    manager = ArmManager(address=(NUC_HOSTNAME, ARM_RPC_PORT), authkey=RPC_AUTHKEY)
-    manager.connect()
-    return manager.ArmInterface()
-
 
 def wait_still(arm, timeout_s=10.0):
     t0 = time.time()
@@ -652,8 +656,9 @@ def wait_still(arm, timeout_s=10.0):
     return arm.get_state()
 
 
-def grab_frame(depth_topic, info_topic, color_topic, timeout_s=10.0):
-    """One (depth_m, intrinsics, color_or_None) from the wrist camera."""
+def grab_frames(depth_topic, info_topic, color_topic, n=1, period=0.2, timeout_s=10.0):
+    """(intrinsics, [(depth_m, color_or_None), ...]): n depth frames from the wrist camera, each a
+    new image, at least `period` s apart; colour is the latest one at that moment."""
     import rclpy
     from sensor_msgs.msg import CameraInfo, Image
     from table_detector_node import depth_to_meters, image_to_numpy
@@ -661,25 +666,33 @@ def grab_frame(depth_topic, info_topic, color_topic, timeout_s=10.0):
     rclpy.init()
     node = rclpy.create_node("place_bowl_look")
     got = {}
-    node.create_subscription(Image, depth_topic, lambda m: got.setdefault("depth", m), 5)
+    node.create_subscription(Image, depth_topic, lambda m: got.__setitem__("depth", m), 5)
     node.create_subscription(CameraInfo, info_topic, lambda m: got.setdefault("info", m), 5)
     if color_topic:
-        node.create_subscription(Image, color_topic, lambda m: got.setdefault("color", m), 5)
+        node.create_subscription(Image, color_topic, lambda m: got.__setitem__("color", m), 5)
+    frames, last, t_last = [], None, -np.inf
     t0 = time.time()
     try:
-        while time.time() - t0 < timeout_s and not ("depth" in got and "info" in got):
-            rclpy.spin_once(node, timeout_sec=0.1)
-        rclpy.spin_once(node, timeout_sec=0.3)  # give colour a moment too
+        while len(frames) < n and time.time() - t0 < timeout_s + n * period:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            depth = got.get("depth")
+            if depth is None or "info" not in got or depth is last or time.time() - t_last < period:
+                continue
+            if color_topic and "color" not in got and time.time() - t0 < 1.0:
+                continue            # give colour a moment to arrive
+            frames.append((depth, got.get("color")))
+            last, t_last = depth, time.time()
     finally:
         node.destroy_node()
         rclpy.shutdown()
-    if "depth" not in got or "info" not in got:
+    if not frames:
         sys.exit(f"No depth/camera_info within {timeout_s:.0f} s on {depth_topic}, {info_topic}. "
                  "Is the camera running? Check: ros2 topic list | grep camera")
+    if len(frames) < n:
+        print(f"only {len(frames)} of {n} frames arrived")
     K = got["info"].k
     intr = dict(fx=K[0], fy=K[4], cx=K[2], cy=K[5])
-    color = image_to_numpy(got["color"]) if "color" in got else None
-    return depth_to_meters(got["depth"]), intr, color
+    return intr, [(depth_to_meters(d), image_to_numpy(c) if c is not None else None) for d, c in frames]
 
 
 def self_distance(points, model, q):
@@ -695,28 +708,13 @@ def self_distance(points, model, q):
 # look
 # ---------------------------------------------------------------------------
 
-def look(args):
-    try:
-        arm = connect_arm()
-    except OSError as e:
-        sys.exit(f"Cannot reach arm_server ({e}) -- the joint angles are needed to place the camera.")
-    state = wait_still(arm)
-    q = np.asarray(state["position"], dtype=float)
-    depth_m, intr, color = grab_frame(args.depth_topic, args.info_topic, args.color_topic)
-    q_after = np.asarray(arm.get_state()["position"], dtype=float)
-    if np.max(np.abs(wrap_deg(q_after - q))) > 0.5:
-        sys.exit("The arm moved while the frame was taken -- hold it still and retry.")
+LOOK_RADIUS = BOWL_RADIUS + LIP_WIDTH               # room for the whole lip ...
+LOOK_EDGE_MARGIN = max(EDGE_MARGIN - LIP_WIDTH, 0.0)  # ... the table edge stays EDGE_MARGIN from the body
 
-    model = ArmModel()
-    T_base_cam = model.fk(q, "end_effector_link") @ load_calibration()
-    R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
-    tilt_mount = np.degrees(np.arccos(np.clip(model.up_base @ UP, -1, 1)))
-    print(f"level frame: arm base tilted {tilt_mount:.1f} deg"
-          + ("" if MOUNT_FILE.exists() else " (no mount.json -- run `place_bowl.py level` if the arm is tilted)"))
-    print(f"camera at {np.round(t, 3).tolist()} m in the level frame, "
-          f"looking {np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1))):.0f} deg off straight down")
 
-    up_cam = R.T @ UP
+def detect_frame(depth_m, intr, R, t, min_height=MIN_TABLE_HEIGHT, max_plane_dist=MAX_PLANE_DIST,
+                 verbose=False):
+    """table_detect on one frame, with the spot limited to the reach band. R, t: camera -> level frame."""
     rmin, rmax = REACH_BAND
 
     def reachable(points_cam):
@@ -726,34 +724,13 @@ def look(args):
 
     # Room for the whole lip: objects stay 2 cm from the lip's edge; the table edge stays the
     # usual EDGE_MARGIN from the bowl body (the lip may overhang toward it).
-    result = detect_table(depth_m, intr, up=up_cam, verbose=True, cam_to_base=(R, t),
-                          min_height=args.min_height, max_plane_dist=args.max_plane_dist,
-                          allowed=reachable, bowl_radius=BOWL_RADIUS + LIP_WIDTH,
-                          edge_margin=max(EDGE_MARGIN - LIP_WIDTH, 0.0))
-    SPOT_DIR.mkdir(exist_ok=True)
-    base_img = color if color is not None and color.shape[:2] == depth_m.shape else depth_to_color(depth_m)
-    if result is None:
-        write_image(str(SPOT_DIR / "overlay.png"), base_img)
-        sys.exit("No table found.")
-    overlay = overlay_image(base_img, result["mask"], obstacle_mask=result["obstacle_mask"],
-                            placement=result["placement"], intrinsics=intr)
-    write_image(str(SPOT_DIR / "overlay.png"), overlay)
-    print(f"overlay: {SPOT_DIR / 'overlay.png'}")
+    return detect_table(depth_m, intr, up=R.T @ UP, verbose=verbose, cam_to_base=(R, t),
+                        min_height=min_height, max_plane_dist=max_plane_dist,
+                        allowed=reachable, bowl_radius=LOOK_RADIUS, edge_margin=LOOK_EDGE_MARGIN)
 
-    normal = R @ result["normal"]
-    tilt = np.degrees(np.arccos(np.clip(abs(normal[2]), -1, 1)))
-    table_z = float(np.median(result["points"] @ R[2] + t[2]))
-    print(f"table: z={table_z:.3f} m in arm_base_link, {tilt:.1f} deg from level")
-    if tilt > MAX_TABLE_TILT_DEG:
-        sys.exit(f"Table plane is {tilt:.1f} deg from level (> {MAX_TABLE_TILT_DEG}) -- "
-                 "wrong plane or bad calibration. Not saved.")
-    placement = result["placement"]
-    if placement is None:
-        sys.exit(f"No room for the bowl: {result['placement_reason']} "
-                 f"(reachable: {rmin:.2f}-{rmax:.2f} m from the arm base). Not saved.")
 
-    spot = R @ placement["point"] + t
-    # Everything standing on the table, for the hand-path check at place time.
+def save_obstacles(depth_m, intr, result, R, t, model, q):
+    """Everything standing on the table (level frame), for the hand-path check at place time."""
     points, pixels = backproject(depth_m, **intr, stride=1)
     obstacle = result["obstacle_mask"][pixels[:, 0], pixels[:, 1]]
     obstacles = points[obstacle] @ R.T + t
@@ -763,18 +740,142 @@ def look(args):
         obstacles = obstacles[np.random.default_rng(0).choice(len(obstacles), 50000, replace=False)]
     np.save(OBSTACLE_FILE, obstacles)
 
-    record = dict(time=time.time(), time_str=time.strftime("%Y-%m-%d %H:%M:%S"),
-                  up_base=model.up_base.tolist(),
-                  joints=q.tolist(), spot=spot.tolist(), table_z=table_z,
-                  table_tilt_deg=float(tilt), bowl_radius=placement["radius"],
-                  obstacle_clearance=placement["obstacle_clearance"],
-                  edge_clearance=placement["edge_clearance"])
-    SPOT_FILE.write_text(json.dumps(record, indent=2))
-    print(f"bowl spot: x={spot[0]:.3f} y={spot[1]:.3f} z={spot[2]:.3f} m in arm_base_link, "
-          f"{np.hypot(spot[0], spot[1]):.2f} m from the base axis "
-          f"({placement['obstacle_clearance'] * 100:.1f} cm from objects, "
-          f"{placement['edge_clearance'] * 100:.1f} cm from the edge)")
-    print(f"saved {SPOT_FILE}. Grip the bowl, then: python3 place_bowl.py place")
+
+def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic=None, color_topic=None,
+                min_height=MIN_TABLE_HEIGHT, max_plane_dist=MAX_PLANE_DIST):
+    """Scan `frames` times at the scan pose, average the spots (outliers dropped), show the result
+    and ask Confirm / Rescan / Cancel. Confirmed: saved to SPOT_FILE and returned as a dict, e.g.
+      {"x": 0.851, "y": 0.094, "table_z": 0.132, "frame": "level", "spread_cm": 0.6, "n_used": 9,
+       "confirmed": True, "spot": [x, y, z], "time": ..., ...}
+    Cancelled: None, nothing saved. Nothing moves. The arm must be still, gripper empty."""
+    depth_topic = depth_topic or f"{CAMERA_NS}/aligned_depth_to_color/image_raw"
+    info_topic = info_topic or f"{CAMERA_NS}/aligned_depth_to_color/camera_info"
+    color_topic = f"{CAMERA_NS}/color/image_raw" if color_topic is None else color_topic
+    try:
+        arm = connect_arm()
+    except OSError as e:
+        sys.exit(f"Cannot reach the arm ({e}) -- the joint angles are needed to place the camera.")
+    model = ArmModel()
+    calib = load_calibration()
+    tilt_mount = np.degrees(np.arccos(np.clip(model.up_base @ UP, -1, 1)))
+    print(f"level frame: arm base tilted {tilt_mount:.1f} deg"
+          + ("" if MOUNT_FILE.exists() else " (no mount.json -- run `place_bowl.py level` if the arm is tilted)"))
+    SPOT_DIR.mkdir(parents=True, exist_ok=True)
+    rmin, rmax = REACH_BAND
+
+    while True:
+        q = np.asarray(wait_still(arm)["position"], dtype=float)
+        print(f"\nscanning {frames} frames, {period:.1f} s apart ...")
+        intr, shots = grab_frames(depth_topic, info_topic, color_topic, n=frames, period=period)
+        q_after = np.asarray(arm.get_state()["position"], dtype=float)
+        if np.max(np.abs(wrap_deg(q_after - q))) > 0.5:
+            sys.exit("The arm moved while the frames were taken -- hold it still and retry.")
+        T_base_cam = model.fk(q, "end_effector_link") @ calib
+        R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
+        print(f"camera at {np.round(t, 3).tolist()} m in the level frame, "
+              f"looking {np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1))):.0f} deg off straight down")
+
+        tables, cands = [], []       # frames that found the table / that also found a spot
+        for i, (depth_m, _color) in enumerate(shots):
+            t0 = time.time()
+            result = detect_frame(depth_m, intr, R, t, min_height, max_plane_dist)
+            took = f"({time.time() - t0:.1f} s)"
+            if result is None:
+                print(f"  frame {i + 1:2d}: no table {took}")
+                continue
+            tilt = float(np.degrees(np.arccos(np.clip(abs((R @ result["normal"])[2]), -1, 1))))
+            table_z = float(np.median(result["points"] @ R[2] + t[2]))
+            if tilt > MAX_TABLE_TILT_DEG:
+                print(f"  frame {i + 1:2d}: table plane {tilt:.1f} deg from level -- wrong plane? {took}")
+                continue
+            tables.append(dict(i=i, result=result, table_z=table_z, tilt=tilt))
+            pl = result["placement"]
+            if pl is None:
+                print(f"  frame {i + 1:2d}: table z={table_z:.3f}, no room: {result['placement_reason']} {took}")
+                continue
+            base = R @ pl["point"] + t
+            cands.append(dict(i=i, result=result, cam=pl["point"], base=base))
+            print(f"  frame {i + 1:2d}: table z={table_z:.3f}, spot x={base[0]:.3f} y={base[1]:.3f} {took}")
+        if not tables:
+            depth_m, color = shots[len(shots) // 2]
+            write_image(str(SPOT_DIR / "overlay.png"), _base_image(depth_m, color))
+            sys.exit(f"No table found in any frame. Picture: {SPOT_DIR / 'overlay.png'}")
+
+        vote = combine_spots([c["base"] for c in cands])
+        ok, reason = vote["ok"], vote["reason"]
+        spot_base = spot_cam = None
+        clear = 0.0
+        if ok:
+            spot_base = vote["spot"]
+            spot_cam = R.T @ (spot_base - t)
+            # Shown on, and checked against, the frame whose own spot is nearest the average.
+            ref = min((c for c, keep in zip(cands, vote["inliers"]) if keep),
+                      key=lambda c: np.linalg.norm(c["base"][:2] - spot_base[:2]))
+            clear = grid_clearance(spot_cam, ref["result"]["placement"])
+            need = LOOK_RADIUS + min(MARGIN, LOOK_EDGE_MARGIN)
+            r = float(np.hypot(*spot_base[:2]))
+            if clear < need:
+                ok, reason = False, (f"the averaged spot is only {clear * 100:.1f} cm clear (need "
+                                     f"{need * 100:.1f}) -- the frames' spots surround something")
+            elif not rmin <= r <= rmax:
+                ok, reason = False, f"the averaged spot is {r:.2f} m from the base (reach {rmin:.2f}-{rmax:.2f})"
+        else:
+            ref = cands[len(cands) // 2] if cands else tables[len(tables) // 2]
+        table_z = float(np.median([f["table_z"] for f in tables]))
+        tilt = float(np.median([f["tilt"] for f in tables]))
+
+        res = ref["result"]
+        depth_m, color = shots[ref["i"]]
+        base_img = overlay_image(_base_image(depth_m, color), res["mask"], obstacle_mask=res["obstacle_mask"])
+        axes = res["placement"]["axes"] if res["placement"] is not None else plane_axes(res["normal"])
+        n_in = int(vote["inliers"].sum())
+        if ok:
+            lines = [f"spot x={spot_base[0]:.3f} y={spot_base[1]:.3f} m, {np.hypot(*spot_base[:2]):.2f} m from base",
+                     f"{n_in} of {len(cands)} spots agree ({frames} frames), spread {vote['spread'] * 100:.1f} cm",
+                     f"table z={table_z:.3f} m, tilt {tilt:.1f} deg, {clear * 100:.1f} cm clear"]
+        else:
+            lines = textwrap.wrap(f"NOT USABLE: {reason}", 70) + [
+                f"{len(cands)} of {frames} frames found a spot; R = rescan, Esc = cancel"]
+        img = confirm_image(base_img, intr, axes, [c["cam"] for c in cands], vote["inliers"],
+                            spot_cam, LOOK_RADIUS, lines, can_confirm=ok)
+        write_image(str(SPOT_DIR / "overlay.png"), img)
+        print("\n".join(lines))
+        print(f"picture: {SPOT_DIR / 'overlay.png'} (grey = each frame's spot, red X = outlier, "
+              "green = the spot)")
+
+        choice = ask(img, can_confirm=ok, window=window)
+        if choice == "rescan":
+            continue
+        if choice == "cancel":
+            print("Cancelled -- nothing saved.")
+            return None
+
+        save_obstacles(depth_m, intr, res, R, t, model, q)
+        record = dict(time=time.time(), time_str=time.strftime("%Y-%m-%d %H:%M:%S"),
+                      x=float(spot_base[0]), y=float(spot_base[1]), table_z=table_z, frame="level",
+                      spread_cm=round(vote["spread"] * 100, 2), n_used=n_in, n_found=len(cands),
+                      n_frames=frames, confirmed=True, clearance=clear,
+                      spot=[float(v) for v in spot_base], up_base=model.up_base.tolist(),
+                      joints=q.tolist(), table_tilt_deg=tilt, bowl_radius=LOOK_RADIUS,
+                      candidates=[[round(float(v), 4) for v in c["base"]] for c in cands],
+                      inliers=[bool(v) for v in vote["inliers"]])
+        SPOT_FILE.write_text(json.dumps(record, indent=2))
+        print(f"confirmed, saved {SPOT_FILE}")
+        return record
+
+
+def _base_image(depth_m, color):
+    return color if color is not None and color.shape[:2] == depth_m.shape else depth_to_color(depth_m)
+
+
+def look(args):
+    record = choose_spot(frames=args.frames, period=args.period, window=not args.no_window,
+                         depth_topic=args.depth_topic, info_topic=args.info_topic,
+                         color_topic=args.color_topic, min_height=args.min_height,
+                         max_plane_dist=args.max_plane_dist)
+    if record is None:
+        sys.exit(1)
+    print("Grip the bowl, then: python3 place_bowl.py place")
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1103,44 @@ def lower_compliant(arm, model, descent):
         arm.switch_out_of_compliant_mode()
 
 
-def place(args):
+def place_at(spot, execute=False, **options):
+    """Place the held bowl at `spot` -- the dict choose_spot() returns -- as `place` would:
+        spot = choose_spot()
+        if spot:
+            place_at(spot, execute=True)
+    options: any `place` flag by its attribute name (yes=True, max_drop=0.3, ...).
+    Like the command line, it exits (SystemExit) with the reason when it refuses."""
+    global ARGS
+    ARGS = build_parser().parse_args(["place"])
+    ARGS.execute = execute
+    for name, value in options.items():
+        if not hasattr(ARGS, name):
+            raise TypeError(f"place_at: unknown option {name!r}")
+        setattr(ARGS, name, value)
+    if ARGS.here:
+        raise TypeError("place_at: --here takes no spot; use `place --here`")
+    place(ARGS, record=spot)
+
+
+def check_spot(record, max_age, require_confirmed=True):
+    """Exit with the reason if a saved spot must not be used."""
+    age_min = (time.time() - record["time"]) / 60
+    print(f"spot from {record['time_str']} ({age_min:.0f} min ago): "
+          f"{np.round(record['spot'], 3).tolist()} m, table z {record['table_z']:.3f} m"
+          + (f", {record['n_used']} frames, spread {record['spread_cm']:.1f} cm" if "n_used" in record else ""))
+    if require_confirmed and not record.get("confirmed"):
+        sys.exit("The spot wasn't confirmed -- run `place_bowl.py look` and click Confirm "
+                 "(or pass --no-confirm).")
+    up_then = np.asarray(record.get("up_base", UP), dtype=float)
+    if np.degrees(np.arccos(np.clip(up_then @ load_mount()[1], -1, 1))) > 0.5:
+        sys.exit("The spot was found before the last `level` -- run look again.")
+    if age_min > max_age:
+        sys.exit(f"Spot is older than {max_age:.0f} min -- the base or table may have moved. "
+                 "Run look again (or pass --max-age).")
+
+
+def place(args, record=None):
+    """record: the spot to use (place_at); None reads SPOT_FILE (or none with --here)."""
     model = ArmModel()
     if args.impedance:
         tilt = np.degrees(np.arccos(np.clip(model.up_base @ UP, -1, 1)))
@@ -1014,20 +1152,14 @@ def place(args):
                      "controller computes gravity as if it were upright (kinova.py gravity(): pinocchio "
                      "default, -z of the base). Its gravity compensation would push the arm sideways with "
                      f"~{np.sin(np.radians(tilt)) * 100:.0f}% of its weight. Use touch sensing (no --impedance).")
-    record = None
-    if not args.here:
-        if not SPOT_FILE.exists():
-            sys.exit(f"No saved spot ({SPOT_FILE}). Run: python3 place_bowl.py look  (or use --here)")
-        record = json.loads(SPOT_FILE.read_text())
-        age_min = (time.time() - record["time"]) / 60
-        print(f"spot from {record['time_str']} ({age_min:.0f} min ago): "
-              f"{np.round(record['spot'], 3).tolist()} m, table z {record['table_z']:.3f} m")
-        up_then = np.asarray(record.get("up_base", UP), dtype=float)
-        if np.degrees(np.arccos(np.clip(up_then @ load_mount()[1], -1, 1))) > 0.5:
-            sys.exit("The spot was found before the last `level` -- run look again.")
-        if age_min > args.max_age:
-            sys.exit(f"Spot is older than {args.max_age:.0f} min -- the base or table may have moved. "
-                     "Run look again (or pass --max-age).")
+    if args.here:
+        record = None
+    else:
+        if record is None:
+            if not SPOT_FILE.exists():
+                sys.exit(f"No saved spot ({SPOT_FILE}). Run: python3 place_bowl.py look  (or use --here)")
+            record = json.loads(SPOT_FILE.read_text())
+        check_spot(record, args.max_age, require_confirmed=not args.no_confirm)
 
     try:
         arm = connect_arm()
@@ -1126,7 +1258,7 @@ def level(args):
     print(f"true up in the arm base frame: {np.round(up_base, 4).tolist()}")
     print(f"=> the arm base is tilted {tilt:.1f} deg (true up leans toward base "
           f"{toward_deg:.0f} deg, where x = 0 and y = 90)")
-    SPOT_DIR.mkdir(exist_ok=True)
+    SPOT_DIR.mkdir(parents=True, exist_ok=True)
     MOUNT_FILE.write_text(json.dumps(dict(up_base=up_base.tolist(), tilt_deg=float(tilt),
                                           time_str=time.strftime("%Y-%m-%d %H:%M:%S")), indent=2))
     print(f"saved {MOUNT_FILE}. `look` and `place` now use this as level / straight down. "
@@ -1142,15 +1274,20 @@ def confirm(prompt):
         sys.exit("\nAborted.")
 
 
-def main():
-    global ARGS
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    p_look = sub.add_parser("look", help="find the spot and save it (no motion)")
-    p_look.add_argument("--depth-topic", default="/camera/wrist/aligned_depth_to_color/image_raw")
-    p_look.add_argument("--info-topic", default="/camera/wrist/aligned_depth_to_color/camera_info")
-    p_look.add_argument("--color-topic", default="/camera/wrist/color/image_raw")
+    p_look = sub.add_parser("look", help="scan, average, confirm by clicking, save the spot (no motion)")
+    p_look.add_argument("--frames", type=int, default=LOOK_FRAMES,
+                        help="frames to scan and average (default %(default)s)")
+    p_look.add_argument("--period", type=float, default=LOOK_PERIOD,
+                        help="s between frames (default %(default).1f)")
+    p_look.add_argument("--no-window", action="store_true",
+                        help="confirm in the terminal instead of a window (the picture is still saved)")
+    p_look.add_argument("--depth-topic", default=f"{CAMERA_NS}/aligned_depth_to_color/image_raw")
+    p_look.add_argument("--info-topic", default=f"{CAMERA_NS}/aligned_depth_to_color/camera_info")
+    p_look.add_argument("--color-topic", default=f"{CAMERA_NS}/color/image_raw")
     p_look.add_argument("--min-height", type=float, default=MIN_TABLE_HEIGHT,
                         help="lowest table height in arm_base_link, m (default %(default)s)")
     p_look.add_argument("--max-plane-dist", type=float, default=MAX_PLANE_DIST,
@@ -1176,7 +1313,14 @@ def main():
                          help="lip to bowl bottom, m (default %(default).2f)")
     p_place.add_argument("--max-age", type=float, default=MAX_AGE_MIN,
                          help="refuse a saved spot older than this, min (default %(default).0f)")
-    ARGS = parser.parse_args()
+    p_place.add_argument("--no-confirm", action="store_true",
+                         help="accept a saved spot nobody clicked Confirm on")
+    return parser
+
+
+def main():
+    global ARGS
+    ARGS = build_parser().parse_args()
     ARGS.yes = getattr(ARGS, "yes", False)
     {"look": look, "level": level, "place": place}[ARGS.cmd](ARGS)
 

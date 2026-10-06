@@ -20,22 +20,12 @@ single-machine rig (rchi-cpu-5). For the lab NUC: ARM_RPC_HOST=192.168.1.3
 The only software stop is Ctrl-C / killing arm_server -- keep a hand on the e-stop.
 """
 import argparse
-import os
 import sys
 import time
 
 import numpy as np
 
-# This rig (rchi-cpu-5) runs arm_server locally -- no NUC. arm_interface reads
-# ARM_RPC_HOST at import time, so default it here; export it to override.
-os.environ.setdefault("ARM_RPC_HOST", "127.0.0.1")
-
-from feeding_deployment.control.robot_controller.arm_interface import (
-    ARM_RPC_PORT,
-    NUC_HOSTNAME,
-    RPC_AUTHKEY,
-    ArmManager,
-)
+from arm_backend import connect_arm, describe   # which arm stack: TABLE_ARM_BACKEND
 
 # Scan pose, J1..J7, RADIANS, each in [-pi, pi]. Read off the Kinova web UI as
 # (353.787, 310.642, 181.649, 234.867, 2.240, 302.922, 91.168) deg in 0-360 form;
@@ -66,21 +56,18 @@ parser.add_argument("--max-jump", type=float, default=150.0,
 args = parser.parse_args()
 
 target = np.asarray(SCAN_POSE, dtype=float)
-print(f"arm server    : {NUC_HOSTNAME}:{ARM_RPC_PORT}  (set ARM_RPC_HOST to change)")
+print(f"arm           : {describe()}")
 print(f"target  (deg) : {fmt(np.degrees(target))}")
 print(f"target  (rad) : {SCAN_POSE}")
 
-ArmManager.register("ArmInterface")
-manager = ArmManager(address=(NUC_HOSTNAME, ARM_RPC_PORT), authkey=RPC_AUTHKEY)
 try:
-    manager.connect()
+    arm = connect_arm()
 except OSError as e:
-    msg = f"Cannot reach arm_server at {NUC_HOSTNAME}:{ARM_RPC_PORT} ({e})."
+    msg = f"Cannot reach the arm: {describe()} ({e})."
     if args.dry_run:
         print(f"\n{msg}\nDRY RUN -- would send: set_joint_position({SCAN_POSE})")
         sys.exit(0)
-    sys.exit(f"{msg}\nIs arm_server.py running? (see the Scan pose section of TOMORROW.md)")
-arm = manager.ArmInterface()
+    sys.exit(f"{msg}\nIs the arm stack running? (README: how to run it)")
 
 state = arm.get_state()
 current = np.asarray(state["position"], dtype=float)
