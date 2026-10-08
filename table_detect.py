@@ -56,6 +56,8 @@ MAX_PLANE_DIST = TABLE_DIST + 0.30    # m, planes farther than this are skipped
 MIN_TABLE_HEIGHT = 0.0   # m, lowest allowed table height in the arm base frame; needs the
                          # camera pose (TF or place_bowl.py's FK). The table measured 0.135 m
                          # above the arm base (2026-10-04); the floor is far below 0. None = off.
+# These are for the wrist camera at the scan pose. The scene camera has its own values
+# in table_detector_node.py (CAMERAS).
 
 # Open3D is optional: nicer/faster plane fitting, image loading and a 3D viewer.
 # Without it (e.g. hard to install on the Jetson) we fall back to NumPy.

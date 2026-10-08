@@ -2,6 +2,7 @@
 
     python3 test_place_bowl.py            # the tests
     python3 test_place_bowl.py --sweep    # where on the table the arm can put the bowl (for REACH_BAND)
+    python3 test_place_bowl.py --sweep -0.028   # ... for a table at that height (level frame, m)
 """
 
 import sys
@@ -161,24 +162,30 @@ def test_a_target_given_by_hand_plans_like_a_looked_one():
 
 def sweep():
     """Bowl-centre distances (from the arm base axis) where the whole place plans."""
+    # One line per distance as soon as it's planned (the full plan takes a while on the Jetson).
+    # ok = the whole place plans; -- = refused (reason shown); no-hold = no start pose found.
     for yaw in (0, 45, -45, 90):
-        row = []
-        for r in np.arange(0.60, 1.25, 0.05):
+        for r in np.arange(0.30, 1.25, 0.05):
             spot = np.array([r * np.cos(np.radians(yaw)), r * np.sin(np.radians(yaw)), TABLE_Z])
             q = holding_pose(spot)
-            ok = False
-            if q is not None:
+            if q is None:
+                result = "no-hold"
+            else:
                 try:
                     P.plan_place(MODEL, q, dict(spot=spot.tolist(), table_z=TABLE_Z))
-                    ok = True
-                except P.Refused:
-                    pass
-            row.append(f"{r:.2f}:{'ok' if ok else '--'}")
-        print(f"yaw {yaw:4d}: " + " ".join(row))
+                    result = "ok"
+                except P.Refused as e:
+                    result = f"-- {str(e)[:70]}"
+            print(f"yaw {yaw:4d}  r {r:.2f}: {result}", flush=True)
 
 
 if __name__ == "__main__":
     if "--sweep" in sys.argv:
+        i = sys.argv.index("--sweep")
+        if len(sys.argv) > i + 1:
+            TABLE_Z = float(sys.argv[i + 1])    # holding_pose and sweep read the global
+        print(f"table z={TABLE_Z:.3f} m, URDF {P.ROBOT_URDF}, flange->fingertip "
+              f"{P.TIP_AHEAD_OF_TOOL:.3f} m past the tool frame")
         sweep()
         sys.exit()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -17,6 +17,7 @@ Nothing outside this folder is changed.
 | `spot_vote.py` | `look`'s several-scan vote: drop outlying spots, average the rest, check the average is clear, and the Confirm / Rescan / Cancel window (terminal prompt without a display). |
 | `test_spot_vote.py` | Offline tests for it, no pybullet needed; `--show` opens the window on a synthetic scan. |
 | `arm_backend.py` | The one place that knows which arm stack is used (`TABLE_ARM_BACKEND`, default `feeding`) and what an arm object must provide. |
+| `kinova_arm.py` | `TABLE_ARM_BACKEND=kinova`: Sheppy's `kinova-gen3-ros2` driver over ROS 2 (state, trajectories, `go_to_ee_pose`, gripper, the impedance lowering). |
 
 ## Running on another machine (e.g. the Jetson under Sheppy)
 Nothing to edit; export what differs:
@@ -28,6 +29,12 @@ Nothing to edit; export what differs:
 | `TABLE_URDF` | `feeding-deployment/src/feeding_deployment/assets/robot/robot.urdf` |
 | `TABLE_CALIB` | `~/.ros2/easy_handeye2/calibrations/wrist_camera_calib.calib` |
 | `TABLE_STATE_DIR` | `~/.table_place` (spot, mount tilt, overlay) |
+| `TABLE_CAMERA` | `scene` (Sheppy's scene camera, pose from TF); `wrist` for the old rig |
+| `TABLE_REACH` | `0.75,0.95` m from the arm base; Sheppy: `0.70,1.05` (`test_place_bowl.py --sweep`) |
+| `TABLE_FLANGE_TO_TIP` | `0.17955` m, kinova backend only (not yet measured on Sheppy) |
+
+On Sheppy: `TABLE_ARM_BACKEND=kinova`, interfaces from `~/table_ws`, and `sheppy.urdf` next to the
+code. Steps and what was learned there: `PROGRESS_2026-10-08.md`, `NEXT_STEPS.md`.
 
 If the Jetson commands the arm some other way than `arm_server.py`, add a backend to `arm_backend.py`.
 The docstring lists the calls it must provide.

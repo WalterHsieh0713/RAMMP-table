@@ -15,6 +15,7 @@ What a backend's connect_arm() must return -- an object with:
   set_joint_position(q)       blocking joint move, rad; returns truthy on success
   set_joint_trajectory(traj)  blocking; place_bowl's continuous lowering (see joint_move_slow)
   set_ee_pose(pos, quat)      blocking Cartesian move (the back-off after release)
+  stop_action()               stop the running move -- called from the second connection
   open_gripper()
   switch_to_joint_compliant_mode() / compliant_set_joint_position(q) / switch_out_of_compliant_mode()
       only for --impedance, which is refused on this arm; a backend may raise NotImplementedError.
@@ -24,6 +25,8 @@ connection while the first one blocks in set_joint_trajectory.
 Backends:
   feeding  ~/feeding-deployment's arm_server.py over TCP (rchi-cpu-5; ARM_RPC_HOST, default
            127.0.0.1). Needs bulldog_bypass.py + the stub base server running there.
+  kinova   RAMMP's kinova-gen3-ros2 driver over ROS 2 (the Jetson / Sheppy); see kinova_arm.py.
+           Source the interfaces first: source ~/ros_ws_velocity_fix/install/setup.zsh
 """
 import os
 
@@ -39,6 +42,8 @@ def describe():
     if BACKEND == "feeding":
         from feeding_deployment.control.robot_controller.arm_interface import ARM_RPC_PORT, NUC_HOSTNAME
         return f"arm_server at {NUC_HOSTNAME}:{ARM_RPC_PORT} (set ARM_RPC_HOST to change)"
+    if BACKEND == "kinova":
+        return "kinova_gen3_node over ROS 2 (execute_joint_trajectory, our own timing)"
     return f"backend '{BACKEND}'"
 
 
@@ -51,4 +56,7 @@ def connect_arm():
         manager = ArmManager(address=(NUC_HOSTNAME, ARM_RPC_PORT), authkey=RPC_AUTHKEY)
         manager.connect()
         return manager.ArmInterface()
-    raise SystemExit(f"TABLE_ARM_BACKEND={BACKEND!r} is not written yet (known: feeding).")
+    if BACKEND == "kinova":
+        from kinova_arm import KinovaArm
+        return KinovaArm()
+    raise SystemExit(f"TABLE_ARM_BACKEND={BACKEND!r} is not written yet (known: feeding, kinova).")

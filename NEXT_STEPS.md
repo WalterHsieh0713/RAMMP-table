@@ -1,112 +1,83 @@
-# What to do next (updated 2026-10-06)
+# What to do next (updated 2026-10-08)
 
-History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`. The design of the several-scan `look`: `PLAN_2026-10-05.md`.
-**New direction (2026-10-06):** the scan moves to a scene camera behind the joystick, and the user picks the spot in the UI. See `PLAN_2026-10-06_scene_camera.md`. HERL test on Thursday 2026-10-08.
+History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, **`PROGRESS_2026-10-08.md`** (the HERL
+session on Sheppy). Design: `PLAN_2026-10-06_scene_camera.md`.
 
-## Now: short video of placing at a given target (no camera needed)
-New on 2026-10-06, offline only (not run on the arm yet; the tests weren't run either, because Windows has no numpy):
-- **`place_bowl.py mark`:** saves where the fingertip is as the spot (level frame; the table height is the fingertip's height). Nothing moves.
-- **`place_bowl.py place --at X Y [--table-z Z]`:** places the bowl centre at typed coordinates (m, level frame: origin on the arm base axis, x forward, y left, z true up). Without `--table-z`, it uses the last saved spot's height.
-- Hand-given targets skip the obstacle check (keep the area clear) and warn when they're outside `REACH_BAND`.
+## Next session: the two new pieces
 
-Steps (arm stack running as in section 1 below):
-- [ ] `python3 test_place_bowl.py`: must pass, including the new `test_a_target_given_by_hand_plans_like_a_looked_one`.
-- [ ] Put a tape X on the table about 0.85 m from the arm base.
-- [ ] Empty gripper, **closed**, hand pointing down: jog the arm (web app, or the wrist button) until the fingertips just touch the X. Then `python3 place_bowl.py mark` (it prints x, y, z).
-- [ ] Lift away, open the gripper, grip the bowl by its lip (hand level, camera on the right).
-- [ ] `python3 place_bowl.py place` (plan only), then `place --execute`. **Record this part**: the bowl should land centred on the X.
-- [ ] Optional second take: move the tape, then `place --at X Y` with typed numbers.
-- [ ] If the bowl lands consistently 1–2 cm off the X: that's the fingertip-length question in section 2 (the model says 18.0 cm, not yet measured).
-- [ ] Check once that x is forward and y is left: `mark` at a point you know.
-- The spot is refused after 30 min (`--max-age`), so mark and place in one session.
+### 1. Contact from the driver's end-effector force
+The lowering has to stop **right as the bowl touches the table**. Everything tried on 2026-10-08
+(where the hand stops, slowing down, falling behind the plan) was fooled by the impedance mode's
+offset and drift. A local driver build (`~/v13-ws` on the Jetson) publishes an end-effector **wrench in
+`/ee_state`**. When that is published by the running driver, use it:
+- [ ] Check which driver is running and its message: `ps aux | grep kinova_gen3_node`;
+      `source ~/v13-ws/install/setup.zsh && ros2 interface show rammp_arm_interfaces/msg/EeState`.
+      Our side must source the **same** interfaces as the running driver.
+- [ ] Note the wrench's field name and **frame** (base_link, or the tool frame), and what it reads at
+      rest and how noisy it is (`ros2 topic echo /ee_state`).
+- [ ] In `kinova_arm.py`, read the z force straight from `/ee_state` instead of `ee_force_z` (the
+      estimate from the joint torques). Keep the rolling baseline and the "changes by more than
+      `FORCE_RISE` for `FORCE_HITS` readings" test; keep the estimate as the fallback when the field
+      is missing.
+- [ ] Goal: down at 2 cm/s, **stops the moment it touches**, holds, setpoint = current joints, opens,
+      backs out. Tune `FORCE_RISE` (5 N) from the printed numbers: empty gripper first, then the bowl.
 
-## Done on 2026-10-05, offline only (not run on the arm yet, not committed)
-- **`look` scans several times, averages, and asks before saving** (`spot_vote.py`, `place_bowl.py`):
-  - `--frames 10` frames, `--period 0.2` s apart; each frame finds a spot;
-  - outliers are dropped (more than 1.5 cm from the median, `OUTLIER_TOL`) and the rest averaged;
-  - it refuses if fewer than 3 frames found a spot, fewer than 60% agree, the average isn't clear, or the average is out of reach;
-  - a window shows each frame's spot (grey circles), the outliers (red X) and the final spot (green). **Confirm** [Enter] saves, **Rescan** [R] scans again, **Cancel** [Esc] saves nothing;
-  - with no display (plain ssh) it asks in the terminal, and the picture is in `~/.table_place/overlay.png`. `--no-window` forces this.
-- **`place` refuses a spot nobody confirmed** (`--no-confirm` overrides). The old `spot.json` is unconfirmed, so run `look` again first.
-- **From Python:** `spot = choose_spot()` then `if spot: place_at(spot, execute=True)`.
-- **Ready for other machines (Sheppy):** `arm_backend.py` is the one place that knows the arm stack. Paths and topics are environment variables (`TABLE_ARM_BACKEND`, `TABLE_CAMERA_NS`, `TABLE_URDF`, `TABLE_CALIB`, `TABLE_STATE_DIR`; see `README.md`).
-- **Tests:** `test_spot_vote.py` 11/11 and `test_placement.py` 10/10 pass. **`test_place_bowl.py` was not run** (needs pybullet; Windows didn't have it).
+### 2. The scene camera → arm transform, then placing at a target
+Next time there will be the **transform matrices from the scene camera to the arm**, so the table, the
+spot and the arm are all in one frame and `look` → `place` can put the bowl **at a target**, not just
+straight down.
+- [ ] Load them: either they're on TF (`ros2 run tf2_ros tf2_echo base_link
+      scene_camera_depth_optical_frame`, which is what `look` reads now) or as a file (then add a
+      loader next to the TF lookup in `place_bowl.grab_frames`).
+- [ ] **Check them:** put a tape X on the table, find it in the camera image, and touch it with the
+      fingertip (`place_bowl.py mark` prints where the fingertip is). They should agree within ~1 cm.
+- [ ] Put clear table **0.70–1.05 m** from the arm base (the reach ring, `TABLE_REACH`), then
+      `place_bowl.py look --no-window` → a confirmed spot.
+- [ ] `place_bowl.py place` (plan only), then `--execute`: empty gripper, then the bowl.
 
-## Next session, in order
+## Before that (short)
+- [ ] **Measure flange to fingertips** with a ruler (flange face to the ends of the closed fingers).
+      The code assumes 17.955 cm (`TABLE_FLANGE_TO_TIP`); cuRobo calls 12 cm the "fingertip midpoint".
+      This sets where the bowl centre lands.
+- [ ] **`place_bowl.py level`** on Sheppy (the URDF has no mount tilt).
+- [ ] **Run today's last version once** (`place --here --execute`, empty gripper) and keep the printed
+      `z force … noise …` and `contact at …` lines. They're the baseline for step 1.
+- [ ] Tell the driver team: switching into impedance, the arm **rises ~2.7 cm** (MEDIUM) or **sags
+      ~3 cm** (SOFT), and drifts while moving. Probably the gravity / payload model.
+- [ ] Commit today's work (nothing from 2026-10-08 is committed).
 
-### 0. Commit, then check on the robot machine
-- [ ] Commit this work (`git status` shows the new and changed files). Also restore the script's executable bit: `git update-index --chmod=+x scan_and_detect.sh`.
-- [ ] `python3 test_place_bowl.py`: must still pass (it wasn't run after today's changes).
-- [ ] `python3 test_spot_vote.py --show`: try the window's buttons and keys with no arm.
+## Later
+- `look` picks the spot nearest the middle of the camera view (a wrist-camera habit). Change it to
+  the spot **nearest the gripper** (what the UI's "hotspot" means), and drop the "arm must be still"
+  requirement for the scene camera.
+- Filter the whole arm and a held bowl out of the scene camera's points (today only the gripper is).
+- The live detector (`table_detector_node.py`) doesn't know the reach ring or the lip, so its green
+  circle can be somewhere `place` can't go. Give it the same limits as `look`.
+- With the bowl already gripped, `look` + `place` in one go (the scene camera isn't blocked by it).
 
-### 1. Start the arm stack (rchi-cpu-5)
+## Setup on the Jetson
 ```bash
-cd ~/feeding-deployment && export ARM_RPC_HOST=127.0.0.1
-python3 src/feeding_deployment/control/robot_controller/arm_server.py   # terminal 1
-python3 scripts/stub_base_server.py                                      # terminal 2
-python3 scripts/bulldog_bypass.py                                        # terminal 3
-python3 scripts/session/arm_set_speed.py low                             # once
+source ~/table_ws/install/setup.zsh        # interfaces matching the nightly driver (zsh!)
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp TABLE_ARM_BACKEND=kinova TABLE_REACH="0.70,1.05"
+cd ~/RAMMP-table
 ```
-With the bulldog bypass, the **physical e-stop is the only stop**.
-
-### 2. Measurements still open
-- [ ] **Measure from the wrist flange to the fingertips.** The model says 18.0 cm. Hand-measured camera-to-fingertip was 5.25 in, while the calibration and model put the lens about 22.8 cm behind the fingertip.
-- [ ] **Check the table tilt.** The Sep 29 frame showed the table within 4° of the arm's level, which doesn't fit the 16° base tilt. `look` prints the tilt; check it after `level`.
-
-### 3. Try the new `look` on the arm (gripper empty)
-```bash
-python3 scan_pose.py
-python3 place_bowl.py look            # window: check the circles, then Confirm
-```
-- [ ] The grey circles should cluster on open table, and the green circle must not touch anything.
-- [ ] Note the printed **spread** and how many of 10 agree. Run it 3–4 times.
-  - Spread under 5 mm and nothing dropped every time → you can lower `--frames` to 5.
-  - "frames disagree" with jumps of about 2 cm (each frame picks a slightly different, equally good spot) → raise `OUTLIER_TOL` in `spot_vote.py` to 0.025.
-  - Real outliers (a frame far off) → `--frames 15`, or `--period 0.5`.
-- [ ] The spot must be **0.75–0.95 m** from the arm base (`REACH_BAND`).
-- [ ] Note how long the detection takes per frame (it's printed).
-
-### 4. Place
-```bash
-python3 place_bowl.py place                       # plan only
-python3 place_bowl.py place --execute             # empty gripper first
-```
-- [ ] Then with the bowl gripped by its lip (hand level, camera on the right seen from behind).
-- [ ] **Can the camera see the table with the bowl in the gripper?** If not, always scan before gripping (as now), or filter out the bowl's points the way the gripper's are filtered (`SELF_RADIUS`).
-- [ ] **Re-measure the reach range** for position-controlled lowering. 0.75–0.95 m came from the impedance-era planning; `python3 test_place_bowl.py --sweep` maps it.
-
-## Sheppy / Jetson integration
-How to connect is in the lab's "Connecting to Sheppy" notes: AnyDesk into Luxray, then `ssh jetson@192.168.55.1`. Keep the password out of this repo. Sheppy is run from `rammp-deployments/december_2026`. Decided: our scripts run **next to** Sheppy over ssh, not as a Sheppy service (for now).
-
-- [ ] **Recon (read-only, nothing moves).** Paste the output to Claude:
-```bash
-cd ~/rammp-deployments/december_2026 && ls -la && git log --oneline -3
-which sheppy; sheppy --help
-cat *.yaml *.toml *.json 2>/dev/null | head -200
-# with Sheppy running:
-ros2 node list; ros2 topic list; ros2 action list; ros2 service list | head -80
-ros2 topic echo --once /joint_states | head -30      # or whatever joint topic is listed
-ls ~/.ros2/easy_handeye2/calibrations/
-python3 -c "import numpy, scipy, yaml, cv2, pybullet; print('deps ok')"
-pip3 list | grep -iE "kortex|feeding|moveit|pybullet"
-ping -c 2 192.168.1.10                                # the arm
-```
-  This answers: how the arm is commanded there, the camera topic names, whether there's a hand-eye calibration for this arm, and whether the Python packages are installed.
-- [ ] **Then (with Claude):**
-  - if it isn't `feeding-deployment`'s `arm_server.py`, add a backend to `arm_backend.py` (its docstring lists the calls it needs);
-  - export `TABLE_CAMERA_NS` etc. to match;
-  - copy the code to the Jetson.
-- [ ] On the Jetson: `python3 place_bowl.py level` again (the base tilt is per mounting), then steps 3–4 above.
-- [ ] **IK:** `place_bowl.py` has its own IK (it starts from the current joints and keeps the bowl level). Only switch to the lab stack's IK if they want everyone on one package.
-- [ ] Later: register `look` and `place` with Sheppy in `december_2026`, if wanted.
+- Copy code from the laptop: `scp *.py abra@192.168.1.11:~/RAMMP-table/`.
+- Live view: `ros2 run foxglove_bridge foxglove_bridge --ros-args -p port:=8791`, then Foxglove on the
+  laptop → `ws://192.168.1.11:8791`, Image panel `/table_detector/overlay` (detector running).
+- `place` is a dry run unless `--execute`. A person on the e-stop for every `--execute`.
 
 ## If something goes wrong
-- **Contact detected too early, or not at all:** tune `MOVE_TORQUE` (continuous lowering) or `STEP_TORQUE` / `TOTAL_TORQUE` (`--steps`) in `place_bowl.py`, using the printed torque changes.
-- **`REFUSED: ... tool frame doesn't match`:** check the tool setting in the Kinova web app.
-- **`STOPPED: reached the lowest planned height without touching`:** the bowl or table isn't where the plan thought. Nothing was released.
-- **"may spin the long way" warning:** watch that joint, with your hand on the e-stop.
-- **`--impedance`** is refused on this arm (tilted base, J6 assumption). Leave it off.
+- **`no /joint_states from kinova_gen3_node`:** the terminal lost its setup. Run the `source` and
+  `export` lines again.
+- **`go_to_ee_pose ended PLANNING_FAILED`:** cuRobo can't reach the pose (its goal is 12 cm in front of
+  the flange, `CUROBO_TOOL_OFFSET`), or the target is below the arm base.
+- **Contact in mid-air / too late:** the printed force change vs `FORCE_RISE` in `kinova_arm.py`.
+  `--torque` uses the old torque sensing (`slide_down`) instead.
+- **`look`: "outside the allowed area":** the clear table isn't 0.70–1.05 m from the arm base.
+- **`ModuleNotFoundError` on the Jetson:** copy all the `.py` files, not only the changed ones.
 
 ## Where things are
-- Code: this repo (`RAMMP-table`). On the robot machine it lived in `~/feeding-deployment-table/table_placement` (branch `table-placement`, uncommitted) and, before that, in `~/walter_table` (old, don't edit). Pick one copy before the Jetson move.
-- Saved state: `~/.table_place/` (`spot.json`, `obstacles.npy`, `mount.json`, `overlay.png`).
+- Code: this repo (`RAMMP-table`), copied to `~/RAMMP-table` on the Jetson. `sheppy.urdf` (the driver's
+  URDF) lives there too. Saved state: `~/.table_place/`.
+- The old rig (`rchi-cpu-5`, `TABLE_ARM_BACKEND=feeding`, wrist camera) still works the old way; its
+  steps are in `PROGRESS_2026-10-05.md`.

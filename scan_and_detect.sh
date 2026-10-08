@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Move the arm to the scan pose, then start the table detector and the overlay
-# viewer (rqt_image_view) -- one terminal.
-# The detector only starts if scan_pose.py confirms the arm arrived; an abort,
-# refusal or missed pose stops here.
+# Start the table detector and the overlay viewer (rqt_image_view) -- one terminal.
+# TABLE_CAMERA picks the camera (default "scene"):
+#   scene - Sheppy's scene camera, fixed to the chair: the arm doesn't move.
+#   wrist - first moves the arm to the scan pose; the detector only starts if
+#           scan_pose.py confirms the arm arrived (an abort, refusal or missed pose stops here).
 #
-#   ./scan_and_detect.sh                 # [ENTER] prompt before the arm moves
-#   ./scan_and_detect.sh --yes           # no prompt (for recording)
-#   ./scan_and_detect.sh --yes --ros-args -p bowl_radius:=0.075   # rest goes to the node
+#   ./scan_and_detect.sh                         # scene camera
+#   ./scan_and_detect.sh --ros-args -p max_plane_dist:=0.8   # rest goes to the node
+#   TABLE_CAMERA=wrist ./scan_and_detect.sh       # [ENTER] prompt before the arm moves
+#   TABLE_CAMERA=wrist ./scan_and_detect.sh --yes # no prompt (for recording)
+#
+# rqt_image_view needs a screen; over plain ssh it can't open (use save_frame.py --overlay).
 cd "$(dirname "$0")"
 
 SCAN_ARGS=()
@@ -15,7 +19,9 @@ if [[ "$1" == "--yes" ]]; then
     shift
 fi
 
-python3 scan_pose.py "${SCAN_ARGS[@]}" || { echo "Not at scan pose -- detector not started."; exit 1; }
+if [[ "${TABLE_CAMERA:-scene}" == "wrist" ]]; then
+    python3 scan_pose.py "${SCAN_ARGS[@]}" || { echo "Not at scan pose -- detector not started."; exit 1; }
+fi
 
 # Overlay viewer in the background; closed when the detector exits (incl. Ctrl-C).
 # `ros2 run` is a wrapper, so kill its child too, not just the wrapper's PID.

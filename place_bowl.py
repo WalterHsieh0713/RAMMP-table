@@ -18,6 +18,20 @@ A target given by hand instead of `look` (no camera; you keep the target clear):
 
 From Python:  spot = choose_spot();  if spot: place_at(spot, execute=True)
 
+On Sheppy (the Jetson, RAMMP's kinova-gen3-ros2 driver; checked 2026-10-08):
+    source ~/table_ws/install/setup.zsh       # interfaces matching the driver (dev = nightly)
+    export TABLE_ARM_BACKEND=kinova            # TABLE_CAMERA defaults to "scene"
+    python3 place_bowl.py look  ...  place --execute
+  look  uses the scene camera; its pose comes from TF (camera frame -> base_link), not FK + calib.
+  place lowers in the driver's IMPEDANCE mode: impedance on, wait until the arm is still, then the
+        straight line down aimed PRESS_BELOW under the table; contact = the hand's z force
+        (estimated from the joint torques -- /ee_state has no wrench) changes a lot, then it
+        holds there. Nothing stopped it = the
+        bowl is NOT let go. --torque: the old rig's touch sensing (slide_down) instead.
+        With the nightly driver + dev interfaces (kinova_arm: compliant_goto), lift / transit are
+        go_to_ee_pose (HOLD_LEVEL, slow speed_scale) and the retreat go_to_ee_pose HOLD_FIXED.
+  URDF: sheppy.urdf next to this file (the driver's /robot_description) unless TABLE_URDF is set.
+
 look
   --frames (10) depth frames from the wrist camera, --period (0.2 s) apart. The camera pose comes
   from the arm's joint angles (forward kinematics on the repo URDF) + the saved hand-eye
@@ -85,7 +99,8 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
-from arm_backend import connect_arm  # (which arm stack: TABLE_ARM_BACKEND)
+from arm_backend import BACKEND, connect_arm  # (which arm stack: TABLE_ARM_BACKEND)
+from kinova_arm import HOLD_FIXED, HOLD_LEVEL, PROFILE_MEDIUM
 from spot_vote import ask, combine_spots, confirm_image, grid_clearance
 from table_detect import (BOWL_RADIUS, EDGE_MARGIN, MARGIN, MAX_PLANE_DIST, MIN_TABLE_HEIGHT,
                           backproject, depth_to_color, detect_table, overlay_image, plane_axes,
@@ -96,9 +111,12 @@ HERE = Path(__file__).resolve().parent
 # TABLE_URDF / TABLE_CALIB / TABLE_STATE_DIR / TABLE_CAMERA_NS instead of editing them here.
 # The repo URDF: next to this folder when it lives inside feeding-deployment, else the lab checkout.
 _URDF = Path("src") / "feeding_deployment" / "assets" / "robot" / "robot.urdf"
+# On Sheppy (TABLE_ARM_BACKEND=kinova): the driver's own URDF, saved from /robot_description as
+# sheppy.urdf next to this file -- /ee_state is computed from it, so ours must match.
+_URDF_CANDIDATES = ([HERE / "sheppy.urdf"] if BACKEND == "kinova" else []) + [
+    HERE.parent / _URDF, Path.home() / "feeding-deployment" / _URDF]
 ROBOT_URDF = Path(os.environ["TABLE_URDF"]) if "TABLE_URDF" in os.environ else next(
-    (p for p in (HERE.parent / _URDF, Path.home() / "feeding-deployment" / _URDF) if p.exists()),
-    HERE.parent / _URDF)
+    (p for p in _URDF_CANDIDATES if p.exists()), _URDF_CANDIDATES[0])
 CALIB_FILE = Path(os.environ.get(
     "TABLE_CALIB", Path.home() / ".ros2" / "easy_handeye2" / "calibrations" / "wrist_camera_calib.calib"))
 CAMERA_NS = os.environ.get("TABLE_CAMERA_NS", "/camera/wrist")
@@ -110,13 +128,21 @@ MOUNT_FILE = SPOT_DIR / "mount.json"   # true "up" in the arm base frame (`place
 # --- the bowl and how it is held (see the diagram above) ---
 LIP_WIDTH = 0.03175     # m, 1.25 in: the flat lip around the bowl, past BOWL_RADIUS
 BOWL_DEPTH = 0.08       # m, lip (= tool frame height) to the bowl's bottom
-TIP_AHEAD_OF_TOOL = 0.05955   # m, fingertip in front of the tool frame (URDF; scene_description)
+# Sheppy (kinova backend): the tool frame is the flange (end_effector_link), and the URDF has no
+# finger_tip link (its Robotiq tip links are the pad bases, ~11 cm out), so the fingertip distance
+# is set here. Default = the old rig's 17.955 cm, same Gen3 + Robotiq 2F-85: MEASURE it on Sheppy
+# (flange face to the closed fingertips) and export TABLE_FLANGE_TO_TIP if it differs.
+FLANGE_TO_TIP = float(os.environ.get("TABLE_FLANGE_TO_TIP", 0.17955))   # m
+TIP_AHEAD_OF_TOOL = (FLANGE_TO_TIP if BACKEND == "kinova"
+                     else 0.05955)   # m, fingertip in front of the tool frame (URDF; scene_description)
 HOLD_REACH = BOWL_RADIUS + TIP_AHEAD_OF_TOOL   # m, bowl centre in front of the tool frame
 # --- the motion ---
 SAFE_HEIGHT = 0.30      # m, tool frame above the table while carrying the bowl over to the spot
 HOVER_GAP = 0.10        # m, bowl bottom this far above the table before going straight down
 PRE_GAP = 0.03          # m, ... one move takes it down to this, then 2 mm steps with touch sensing
 PRESS_BELOW = 0.03      # m, never lower than this below where the table should be
+if BACKEND == "kinova":   # impedance lowering: the hand sits a few cm off its command and the table
+    PRESS_BELOW = 0.10    # stops it (contact = velocity ~0), so the line is aimed well below the table
 MIN_TOOL_HEIGHT = 0.02  # m, the tool frame is never targeted lower than this above the table
 MAX_DROP = 0.40         # m, --here: keep going down until the table is felt -- at most this far
                         # (or as far as the arm can reach straight down, whichever is less)
@@ -166,6 +192,14 @@ MAX_SAG = 0.02          # m, hand drop allowed when compliant mode takes over
 # The controller's own soft joint limits (compliant_controller.py: limits minus 15 deg).
 COMPLIANT_LIMITS = {1: 2.24 - np.radians(15), 3: 2.57 - np.radians(15)}   # J2, J4
 
+# --- the kinova driver ---
+# Lowering: the straight line down in the driver's IMPEDANCE mode; contact = the hand's velocity
+# goes to ~0 (kinova_arm.lower_line_until_contact). `--torque`: slide_down's torque sensing instead.
+LOWER_PROFILE = PROFILE_MEDIUM   # impedance gains for the lowering (SOFT sagged ~3 cm on 2026-10-08)
+EARLY_STOP = 0.03       # m, contact more than this above where the bowl meets the table = not the table
+# nightly driver (go_to_ee_pose with speed_scale / orientation_hold):
+GOTO_SPEED_SCALE = 0.2  # carrying moves run at this fraction of cuRobo's planned speed
+
 # --- look ---
 LOOK_FRAMES = 10        # frames scanned and averaged (>= 5 for the outlier vote to mean much)
 LOOK_PERIOD = 0.2       # s between them
@@ -176,6 +210,9 @@ HAND_BEHIND = 0.20      # m, the hand + wrist reach this far behind the tool fra
 # ring in every direction swept (table 0.135 m above the arm base). Redo the sweep
 # (test_place_bowl.py --sweep) if the table height, the hold or the bowl changes.
 REACH_BAND = (0.75, 0.95)
+# Another chair / table height: re-sweep, then export TABLE_REACH="min,max" (m).
+if "TABLE_REACH" in os.environ:
+    REACH_BAND = tuple(float(v) for v in os.environ["TABLE_REACH"].split(","))
 MAX_TABLE_TILT_DEG = 10.0
 
 # --- checks ---
@@ -313,9 +350,20 @@ class ArmModel:
         # true up (same origin). The arm itself takes base-frame commands; joint commands don't
         # care, and the few Cartesian ones convert with R_wb.
         self.R_wb, self.up_base = load_mount()
+        # Sheppy's URDF has neither tool_frame nor finger_tip: add them on end_effector_link's z
+        # axis (the driver's tool frame IS end_effector_link -- /ee_state matched it, 2026-10-08).
+        self.virtual = {}
+        if "tool_frame" not in links:
+            self.virtual["tool_frame"] = 0.0
+        if "finger_tip" not in links:
+            self.virtual["finger_tip"] = FLANGE_TO_TIP
 
     def fk(self, q, link="tool_frame", base=False):
         """Pose of `link` in the level frame (base=True: in the arm's own base frame)."""
+        if link in self.virtual:
+            T = self.fk(q, "end_effector_link", base)
+            T[:3, 3] += self.virtual[link] * T[:3, 2]
+            return T
         for j, v in zip(self.arm, q):
             self.p.resetJointState(self.robot, j, float(v), physicsClientId=self.cid)
         s = self.p.getLinkState(self.robot, self.links[link], computeForwardKinematics=True,
@@ -662,15 +710,21 @@ def wait_still(arm, timeout_s=10.0):
     return arm.get_state()
 
 
-def grab_frames(depth_topic, info_topic, color_topic, n=1, period=0.2, timeout_s=10.0):
-    """(intrinsics, [(depth_m, color_or_None), ...]): n depth frames from the wrist camera, each a
-    new image, at least `period` s apart; colour is the latest one at that moment."""
+def grab_frames(depth_topic, info_topic, color_topic, n=1, period=0.2, timeout_s=10.0, tf_to=None):
+    """(intrinsics, [(depth_m, color_or_None), ...], cam_tf): n depth frames, each a new image, at
+    least `period` s apart; colour is the latest one at that moment. tf_to: also look up the depth
+    camera's pose in that frame from TF -> cam_tf = (R, t) taking camera points into it (else None)."""
     import rclpy
     from sensor_msgs.msg import CameraInfo, Image
     from table_detector_node import depth_to_meters, image_to_numpy
 
     rclpy.init()
     node = rclpy.create_node("place_bowl_look")
+    if tf_to:
+        from tf2_ros import Buffer, TransformListener
+        tf_buffer = Buffer()
+        tf_listener = TransformListener(tf_buffer, node)  # noqa: F841 (keeps listening)
+    cam_tf = None
     got = {}
     node.create_subscription(Image, depth_topic, lambda m: got.__setitem__("depth", m), 5)
     node.create_subscription(CameraInfo, info_topic, lambda m: got.setdefault("info", m), 5)
@@ -688,17 +742,28 @@ def grab_frames(depth_topic, info_topic, color_topic, n=1, period=0.2, timeout_s
                 continue            # give colour a moment to arrive
             frames.append((depth, got.get("color")))
             last, t_last = depth, time.time()
+        while tf_to and frames and cam_tf is None and time.time() - t0 < timeout_s + n * period + 3.0:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            try:
+                tf = tf_buffer.lookup_transform(tf_to, frames[0][0].header.frame_id, rclpy.time.Time())
+            except Exception:
+                continue
+            r, tr = tf.transform.rotation, tf.transform.translation
+            cam_tf = (Rotation.from_quat([r.x, r.y, r.z, r.w]).as_matrix(), np.array([tr.x, tr.y, tr.z]))
     finally:
         node.destroy_node()
         rclpy.shutdown()
     if not frames:
         sys.exit(f"No depth/camera_info within {timeout_s:.0f} s on {depth_topic}, {info_topic}. "
                  "Is the camera running? Check: ros2 topic list | grep camera")
+    if tf_to and cam_tf is None:
+        sys.exit(f"No TF {frames[0][0].header.frame_id} -> {tf_to}. Check: ros2 run tf2_ros tf2_echo "
+                 f"{tf_to} {frames[0][0].header.frame_id}")
     if len(frames) < n:
         print(f"only {len(frames)} of {n} frames arrived")
     K = got["info"].k
     intr = dict(fx=K[0], fy=K[4], cx=K[2], cy=K[5])
-    return intr, [(depth_to_meters(d), image_to_numpy(c) if c is not None else None) for d, c in frames]
+    return intr, [(depth_to_meters(d), image_to_numpy(c) if c is not None else None) for d, c in frames], cam_tf
 
 
 def self_distance(points, model, q):
@@ -748,21 +813,32 @@ def save_obstacles(depth_m, intr, result, R, t, model, q):
 
 
 def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic=None, color_topic=None,
-                min_height=MIN_TABLE_HEIGHT, max_plane_dist=MAX_PLANE_DIST):
+                min_height=None, max_plane_dist=None):
     """Scan `frames` times at the scan pose, average the spots (outliers dropped), show the result
     and ask Confirm / Rescan / Cancel. Confirmed: saved to SPOT_FILE and returned as a dict, e.g.
       {"x": 0.851, "y": 0.094, "table_z": 0.132, "frame": "level", "spread_cm": 0.6, "n_used": 9,
        "confirmed": True, "spot": [x, y, z], "time": ..., ...}
     Cancelled: None, nothing saved. Nothing moves. The arm must be still, gripper empty."""
-    depth_topic = depth_topic or f"{CAMERA_NS}/aligned_depth_to_color/image_raw"
-    info_topic = info_topic or f"{CAMERA_NS}/aligned_depth_to_color/camera_info"
-    color_topic = f"{CAMERA_NS}/color/image_raw" if color_topic is None else color_topic
+    from table_detector_node import CAMERA, CAMERA_NAME
+    scene = CAMERA_NAME == "scene"
+    if scene:   # Sheppy's scene camera: fixed to the chair, pose from TF
+        depth_topic = depth_topic or CAMERA["depth_topic"]
+        info_topic = info_topic or CAMERA["info_topic"]
+        color_topic = CAMERA["color_topic"] if color_topic is None else color_topic
+        min_height = CAMERA["min_table_height"] if min_height is None else min_height
+        max_plane_dist = CAMERA["max_plane_dist"] if max_plane_dist is None else max_plane_dist
+    else:
+        depth_topic = depth_topic or f"{CAMERA_NS}/aligned_depth_to_color/image_raw"
+        info_topic = info_topic or f"{CAMERA_NS}/aligned_depth_to_color/camera_info"
+        color_topic = f"{CAMERA_NS}/color/image_raw" if color_topic is None else color_topic
+        min_height = MIN_TABLE_HEIGHT if min_height is None else min_height
+        max_plane_dist = MAX_PLANE_DIST if max_plane_dist is None else max_plane_dist
     try:
         arm = connect_arm()
     except OSError as e:
         sys.exit(f"Cannot reach the arm ({e}) -- the joint angles are needed to place the camera.")
     model = ArmModel()
-    calib = load_calibration()
+    calib = None if scene else load_calibration()
     tilt_mount = np.degrees(np.arccos(np.clip(model.up_base @ UP, -1, 1)))
     print(f"level frame: arm base tilted {tilt_mount:.1f} deg"
           + ("" if MOUNT_FILE.exists() else " (no mount.json -- run `place_bowl.py level` if the arm is tilted)"))
@@ -772,12 +848,17 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
     while True:
         q = np.asarray(wait_still(arm)["position"], dtype=float)
         print(f"\nscanning {frames} frames, {period:.1f} s apart ...")
-        intr, shots = grab_frames(depth_topic, info_topic, color_topic, n=frames, period=period)
+        intr, shots, cam_tf = grab_frames(depth_topic, info_topic, color_topic, n=frames, period=period,
+                                          tf_to="base_link" if scene else None)
         q_after = np.asarray(arm.get_state()["position"], dtype=float)
         if np.max(np.abs(wrap_deg(q_after - q))) > 0.5:
             sys.exit("The arm moved while the frames were taken -- hold it still and retry.")
-        T_base_cam = model.fk(q, "end_effector_link") @ calib
-        R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
+        if scene:
+            # base_link <- camera from TF, turned into the level frame (same origin, z true up).
+            R, t = model.R_wb @ cam_tf[0], model.R_wb @ cam_tf[1]
+        else:
+            T_base_cam = model.fk(q, "end_effector_link") @ calib
+            R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
         print(f"camera at {np.round(t, 3).tolist()} m in the level frame, "
               f"looking {np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1))):.0f} deg off straight down")
 
@@ -1109,6 +1190,76 @@ def lower_compliant(arm, model, descent):
         arm.switch_out_of_compliant_mode()
 
 
+def ee_force_z(model, q, tau, eps=1e-4):
+    """The hand's z force (N, base z), estimated from the joint torques: the wrench at
+    end_effector_link that tau would balance, tau = J^T w (least squares; numerical Jacobian of
+    the URDF). Includes gravity -- callers compare changes. /ee_state has no wrench: the driver
+    has no force estimate of its own."""
+    q = np.asarray(q, dtype=float)
+    T0 = model.fk(q, "end_effector_link", base=True)
+    J = np.zeros((6, 7))
+    for i in range(7):
+        dq = q.copy()
+        dq[i] += eps
+        T = model.fk(dq, "end_effector_link", base=True)
+        J[:3, i] = (T[:3, 3] - T0[:3, 3]) / eps
+        J[3:, i] = Rotation.from_matrix(T[:3, :3] @ T0[:3, :3].T).as_rotvec() / eps
+    w = np.linalg.lstsq(J.T, np.asarray(tau, dtype=float), rcond=None)[0]
+    return float(w[2])
+
+
+def lower_until_still(arm, model, descent, table_z, bowl_depth):
+    """Kinova backend: the planned straight line down in the driver's IMPEDANCE mode; contact =
+    the hand's z force (from the joint torques, ee_force_z) changes a lot (see
+    kinova_arm.lower_line_until_contact). Returns the tool z; raises Refused (bowl NOT let go)
+    if nothing stopped it or it stopped well above the table."""
+    zs, qs = descent
+    print(f"lowering: straight line down in IMPEDANCE mode (profile {LOWER_PROFILE}) at "
+          f"{SLIDE_SPEED * 100:.0f} cm/s, aimed as low as z={float(zs[-1]):.3f}; stops when the hand's z "
+          "force changes")
+    contact = arm.lower_line_until_contact([[float(v) for v in q] for q in qs],
+                                           step_s=PATH_STEP / SLIDE_SPEED,
+                                           z_planned=[model.fk(q, base=True)[2, 3] for q in qs],
+                                           profile=LOWER_PROFILE,
+                                           force_z=lambda q, tau: ee_force_z(model, q, tau))
+    if contact is None:
+        raise Refused("STOPPED: the impedance lowering did not run (reason above) -- nothing let go")
+    arm.wait_z_still(3.0)               # the end effector's z velocity ~0
+    state = arm.get_state()
+    z = float(model.fk(np.asarray(state["position"], dtype=float))[2, 3])
+    if not contact:
+        raise Refused(f"STOPPED: went down to tool z={z:.3f} without the hand stopping on anything "
+                      "-- NOT letting go")
+    if table_z is not None and z > table_z + bowl_depth + EARLY_STOP:
+        raise Refused(f"STOPPED: the hand stopped at z={z:.3f}, {(z - table_z - bowl_depth) * 100:.0f} cm "
+                      "above where the bowl meets the table -- it hit something else; NOT letting go")
+    print(f"contact at tool z={z:.3f}")
+    return z
+
+
+def run_compliant_goto(arm, model, moves):
+    """Nightly driver: the carrying moves are go_to_ee_pose to the tool pose of the planned (and
+    checked) joint targets, HOLD_LEVEL at GOTO_SPEED_SCALE. The "adjust" turn in place stays our
+    joint move. The lowering is separate (lower_until_still, or slide_down with --torque)."""
+    def pose(q):
+        T = model.fk(q, base=True)          # go_to_ee_pose takes base_link poses
+        return T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat()
+
+    for name, q in moves:
+        if name == "adjust":
+            # A small turn in place: our checked joint move (check_in_place). go_to_ee_pose would
+            # let cuRobo take any path between the two poses -- it swung the hand sideways and
+            # back on 2026-10-08.
+            joint_move(arm, q, name)
+            continue
+        pos, quat = pose(q)
+        print(f"-> {name} (go_to_ee_pose, level, speed x{GOTO_SPEED_SCALE})")
+        code = arm.set_ee_pose(pos, quat, hold=HOLD_LEVEL, speed_scale=GOTO_SPEED_SCALE)
+        if code != 0:
+            raise Refused(f"STOPPED: {name} did not complete (go_to_ee_pose error {code})")
+        wait_still(arm)
+
+
 def place_at(spot, execute=False, **options):
     """Place the held bowl at `spot` -- the dict choose_spot() returns -- as `place` would:
         spot = choose_spot()
@@ -1174,6 +1325,10 @@ def check_spot(record, max_age, require_confirmed=True):
 def place(args, record=None):
     """record: the spot to use (place_at); None reads SPOT_FILE (or none with --here)."""
     model = ArmModel()
+    kinova = BACKEND == "kinova"
+    if args.impedance and kinova:
+        sys.exit("--impedance is the old rig's compliant controller; on the kinova backend the "
+                 "lowering is touch sensing (slide_down), or --steps")
     if args.impedance:
         tilt = np.degrees(np.arccos(np.clip(model.up_base @ UP, -1, 1)))
         if not MOUNT_FILE.exists():
@@ -1252,13 +1407,24 @@ def place(args, record=None):
                  f"  python3 ~/feeding-deployment/scripts/session/arm_set_speed.py {REQUIRED_SPEED}")
     confirm("Area clear, bowl gripped, hand on the e-stop? [ENTER] to start")
 
+    compliant_goto = kinova and arm.compliant_goto
+    still = kinova and not args.torque and not args.steps
+    print("moves: " + ("go_to_ee_pose (nightly driver: speed_scale, HOLD_LEVEL)" if compliant_goto
+                       else "planned joint moves") + "; lowering: "
+          + ("impedance, stop on the hand's z force" if still else "touch sensing (joint torques)"))
     try:
-        for name, q in moves:
-            joint_move(arm, q, name)
+        if compliant_goto:
+            run_compliant_goto(arm, model, moves)
+        else:
+            for name, q in moves:
+                joint_move(arm, q, name)
         T = model.fk(np.asarray(arm.get_state()["position"], dtype=float))
         if bowl_tilt_deg(T[:3, :3]) > 1.0:
             raise Refused(f"STOPPED: bowl is {bowl_tilt_deg(T[:3, :3]):.1f} deg from level after the moves")
-        if args.impedance:
+        if still:
+            lower_until_still(arm, model, descent, None if args.here else record["table_z"],
+                              args.bowl_depth)
+        elif args.impedance:
             lower_compliant(arm, model, descent)
         elif args.steps:
             touch_down(arm, descent)
@@ -1274,7 +1440,10 @@ def place(args, record=None):
     time.sleep(0.5)
     for name, pos, quat in retreat_poses(arm.get_state()["ee_pos"], model.R_wb):
         print(f"-> {name}")
-        arm.set_ee_pose(pos.tolist(), quat.tolist())
+        if compliant_goto:   # keep the hand's orientation, slowly, so the fingers slide off the lip
+            arm.set_ee_pose(pos.tolist(), quat.tolist(), hold=HOLD_FIXED, speed_scale=GOTO_SPEED_SCALE)
+        else:
+            arm.set_ee_pose(pos.tolist(), quat.tolist())
         wait_still(arm)
     print("Done: bowl placed, hand clear.")
 
@@ -1330,13 +1499,14 @@ def build_parser():
                         help="s between frames (default %(default).1f)")
     p_look.add_argument("--no-window", action="store_true",
                         help="confirm in the terminal instead of a window (the picture is still saved)")
-    p_look.add_argument("--depth-topic", default=f"{CAMERA_NS}/aligned_depth_to_color/image_raw")
-    p_look.add_argument("--info-topic", default=f"{CAMERA_NS}/aligned_depth_to_color/camera_info")
-    p_look.add_argument("--color-topic", default=f"{CAMERA_NS}/color/image_raw")
-    p_look.add_argument("--min-height", type=float, default=MIN_TABLE_HEIGHT,
-                        help="lowest table height in arm_base_link, m (default %(default)s)")
-    p_look.add_argument("--max-plane-dist", type=float, default=MAX_PLANE_DIST,
-                        help="skip planes farther than this from the camera, m (default %(default).2f)")
+    # Defaults depend on TABLE_CAMERA (scene: table_detector_node.CAMERAS; wrist: TABLE_CAMERA_NS).
+    p_look.add_argument("--depth-topic")
+    p_look.add_argument("--info-topic")
+    p_look.add_argument("--color-topic")
+    p_look.add_argument("--min-height", type=float,
+                        help="lowest table height in the level frame, m (default: per camera)")
+    p_look.add_argument("--max-plane-dist", type=float,
+                        help="skip planes farther than this from the camera, m (default: per camera)")
     p_level = sub.add_parser("level", help="record true up: hold the hand truly level, camera on the right")
     p_level.add_argument("--clear", action="store_true", help="forget it (base z = up again)")
     sub.add_parser("mark", help="save the fingertip's position as the spot: touch the target on the "
@@ -1353,6 +1523,9 @@ def build_parser():
                          help="--at: table height, m (default: from the last saved spot)")
     p_place.add_argument("--max-drop", type=float, default=MAX_DROP,
                          help="--here: lowest the lowering may go below the start, m (default %(default).2f)")
+    p_place.add_argument("--torque", action="store_true",
+                         help="kinova backend: lower with joint-torque touch sensing (slide_down) "
+                              "instead of impedance + stop when the hand is still")
     p_place.add_argument("--steps", action="store_true",
                          help="lower in 2 mm steps (stop, read torques, repeat) instead of one slow move")
     p_place.add_argument("--impedance", action="store_true",
