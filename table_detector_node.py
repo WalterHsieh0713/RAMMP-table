@@ -37,6 +37,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
@@ -99,7 +100,8 @@ class TableDetector(Node):
         # Color image to draw the red table on. If it doesn't match the depth size
         # (unaligned depth), the overlay falls back to a grayscale depth picture.
         self.declare_parameter("color_topic", CAMERA["color_topic"])
-        self.declare_parameter("base_frame", "base_link")
+        # "" = whichever of arm_mount (2026-10-19 nightly driver) / base_link (older) TF has.
+        self.declare_parameter("base_frame", "")
         self.declare_parameter("rate_hz", 2.0)
         # Floor rejection. max_plane_dist: planes farther than this from the camera
         # (m) are never the table. min_table_height: planes lower than this in
@@ -153,6 +155,15 @@ class TableDetector(Node):
         """Rotation + translation taking camera-frame points into base_frame, or None."""
         base = self.get_parameter("base_frame").value
         try:
+            if not base:
+                for name in ("arm_mount", "base_link"):
+                    if self.tf_buffer.can_transform(name, camera_frame, rclpy.time.Time()):
+                        base = name
+                        self.set_parameters([Parameter("base_frame", value=name)])
+                        self.get_logger().info(f"base frame: {name}")
+                        break
+                else:
+                    raise LookupError("neither arm_mount nor base_link")
             tf = self.tf_buffer.lookup_transform(base, camera_frame, rclpy.time.Time())
         except Exception as e:  # TF not published / frames not connected
             if not self.warned_no_tf:

@@ -12,12 +12,14 @@ Nothing outside this folder is changed.
 | `scan_and_detect.sh` | Scan pose, then detector + overlay viewer, one command. |
 | `save_frame.py` | Saves one depth/color frame and prints the intrinsics. |
 | `test_placement.py` | Offline tests: `python3 test_placement.py`. |
-| `place_bowl.py` | `look` (find + save a reachable spot) and `place` (bowl already gripped: square the hand, carry, lower until it touches, release). Dry run unless `--execute`. A target given by hand instead: `mark` (fingertip on the target) or `place --at X Y`. |
+| `place_bowl.py` | `look` (find + save a reachable spot) and `place` (bowl already gripped: square the hand, carry, lower until it touches, release). Dry run unless `--execute`. A target given by hand instead: `mark` (fingertip on the target) or `place --at X Y`. Debugging: `status`, `reset [--save]`, `retreat`. |
 | `test_place_bowl.py` | Offline tests for the planner; `--sweep` maps where the arm can place. |
 | `spot_vote.py` | `look`'s several-scan vote: drop outlying spots, average the rest, check the average is clear, and the Confirm / Rescan / Cancel window (terminal prompt without a display). |
 | `test_spot_vote.py` | Offline tests for it, no pybullet needed; `--show` opens the window on a synthetic scan. |
 | `arm_backend.py` | The one place that knows which arm stack is used (`TABLE_ARM_BACKEND`, default `feeding`) and what an arm object must provide. |
 | `kinova_arm.py` | `TABLE_ARM_BACKEND=kinova`: Sheppy's `kinova-gen3-ros2` driver over ROS 2 (state, trajectories, `go_to_ee_pose`, gripper, the impedance lowering). |
+| `save_urdf.py` | Saves the driver's model (`/arm/robot_description`) as `sheppy.urdf`; run after a driver update. |
+| `plot_descent.py` | Plots the latest recorded lowering (`~/.table_place/descents/`): height, the 6 velocities, force z, by phase. |
 
 ## Running on another machine (e.g. the Jetson under Sheppy)
 Nothing to edit; export what differs:
@@ -34,7 +36,9 @@ Nothing to edit; export what differs:
 | `TABLE_FLANGE_TO_TIP` | `0.17955` m, kinova backend only (not yet measured on Sheppy) |
 
 On Sheppy: `TABLE_ARM_BACKEND=kinova`, interfaces from `~/table_ws`, and `sheppy.urdf` next to the
-code. Steps and what was learned there: `PROGRESS_2026-10-08.md`, `NEXT_STEPS.md`.
+code (`save_urdf.py`). Steps and what was learned there: `PROGRESS_2026-10-08.md`,
+`PROGRESS_2026-10-19.md`, `NEXT_STEPS.md`. Tuning by environment there: `TABLE_CONTACT`,
+`TABLE_VZ_STOP`, `TABLE_HOLD_PRESS`, `TABLE_FORCE_RISE_Z` (see `kinova_arm.py`).
 
 If the Jetson commands the arm some other way than `arm_server.py`, add a backend to `arm_backend.py`.
 The docstring lists the calls it must provide.

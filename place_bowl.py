@@ -18,19 +18,26 @@ A target given by hand instead of `look` (no camera; you keep the target clear):
 
 From Python:  spot = choose_spot();  if spot: place_at(spot, execute=True)
 
-On Sheppy (the Jetson, RAMMP's kinova-gen3-ros2 driver; checked 2026-10-08):
+On Sheppy (the Jetson, RAMMP's kinova-gen3-ros2 driver; nightly of 2026-10-19):
     source ~/table_ws/install/setup.zsh       # interfaces matching the driver (dev = nightly)
     export TABLE_ARM_BACKEND=kinova            # TABLE_CAMERA defaults to "scene"
     python3 place_bowl.py look  ...  place --execute
-  look  uses the scene camera; its pose comes from TF (camera frame -> base_link), not FK + calib.
-  place lowers in the driver's IMPEDANCE mode: impedance on, wait until the arm is still, then the
-        straight line down aimed PRESS_BELOW under the table; contact = the hand's z force
-        (estimated from the joint torques -- /ee_state has no wrench) changes a lot, then it
-        holds there. Nothing stopped it = the
-        bowl is NOT let go. --torque: the old rig's touch sensing (slide_down) instead.
+  look  uses the scene camera; its pose comes from TF (camera frame -> arm_mount / base_link).
+  place squares the hand to the NEAREST hold (camera left or right), pointing PLACE_PITCH_DEG
+        (5) down so the bowl touches first, then lowers in the driver's IMPEDANCE mode:
+        impedance on, wait until the arm is still, then the straight line down aimed below the
+        table; contact = the hand's z velocity comes back up to 0 (TABLE_CONTACT=force: the
+        /ee_state wrench tests instead). Then it holds HOLD_PRESS below the contact point, opens
+        the gripper and backs out RETREAT along a line it plans itself -- all in impedance, and
+        it stays there. Nothing stopped it = the bowl is NOT let go (and impedance is left).
+        Every lowering is recorded (kinova_arm.LOG_DIR; plot_descent.py). --torque: the old
+        rig's touch sensing (slide_down) instead.
         With the nightly driver + dev interfaces (kinova_arm: compliant_goto), lift / transit are
-        go_to_ee_pose (HOLD_LEVEL, slow speed_scale) and the retreat go_to_ee_pose HOLD_FIXED.
-  URDF: sheppy.urdf next to this file (the driver's /robot_description) unless TABLE_URDF is set.
+        go_to_ee_pose (HOLD_LEVEL, slow speed_scale).
+  status / reset [--save] / retreat: debugging (where the hand is; back to a saved start pose,
+        gripper closed; only the back-out).
+  URDF: sheppy.urdf next to this file (save_urdf.py: the driver's /arm/robot_description)
+        unless TABLE_URDF is set.
 
 look
   --frames (10) depth frames from the wrist camera, --period (0.2 s) apart. The camera pose comes
@@ -100,7 +107,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
 from arm_backend import BACKEND, connect_arm  # (which arm stack: TABLE_ARM_BACKEND)
-from kinova_arm import HOLD_FIXED, HOLD_LEVEL, PROFILE_MEDIUM
+from kinova_arm import HOLD_FIXED, HOLD_LEVEL, HOLD_PRESS, PROFILE_MEDIUM
 from spot_vote import ask, combine_spots, confirm_image, grid_clearance
 from table_detect import (BOWL_RADIUS, EDGE_MARGIN, MARGIN, MAX_PLANE_DIST, MIN_TABLE_HEIGHT,
                           backproject, depth_to_color, detect_table, overlay_image, plane_axes,
@@ -123,6 +130,7 @@ CAMERA_NS = os.environ.get("TABLE_CAMERA_NS", "/camera/wrist")
 SPOT_DIR = Path(os.environ.get("TABLE_STATE_DIR", Path.home() / ".table_place"))
 SPOT_FILE = SPOT_DIR / "spot.json"
 OBSTACLE_FILE = SPOT_DIR / "obstacles.npy"
+START_FILE = SPOT_DIR / "start.json"   # where the last place --execute started (reset goes back)
 MOUNT_FILE = SPOT_DIR / "mount.json"   # true "up" in the arm base frame (`place_bowl.py level`)
 
 # --- the bowl and how it is held (see the diagram above) ---
@@ -147,8 +155,19 @@ MIN_TOOL_HEIGHT = 0.02  # m, the tool frame is never targeted lower than this ab
 MAX_DROP = 0.40         # m, --here: keep going down until the table is felt -- at most this far
                         # (or as far as the arm can reach straight down, whichever is less)
 RETREAT = 2.5 * LIP_WIDTH   # m, straight back after letting go, clear of the lip, then stop
+RETREAT_SPEED = 0.03        # m/s, the impedance retreat along its planned line ...
+RETREAT_STEP = 0.004        # m, ... joint waypoints this far apart
+RETREAT_RELEASE = 0.25      # the first quarter of the retreat also lifts the setpoint by HOLD_PRESS
 MAX_ADJUST_DEG = 15.0   # the adjust step may only correct this much
 MAX_BOWL_TILT_DEG = 10.0    # bowl tilt allowed anywhere along a joint move
+RESET_TOL_DEG = 3.0         # reset in impedance: how far off its target a joint may end up
+OPEN_STALLED_PLACE = 0.3    # retreat: refuses with the gripper closed more than this (kinova_arm.OPEN_STALLED)
+PLACE_PITCH_DEG = 5.0       # place: the hand points this many deg down (bowl first onto the table)
+MAX_HOLD_PITCH_DEG = 10.0   # place --tilt: most the hand may point down
+# How the bowl is held while placing: place --tilt sets it. 0 = level; > 0 = the hand points this
+# many deg down, so the bowl's far side touches the table before the fingers. Every "bowl tilt"
+# below is measured from THIS hold, not from level.
+HOLD_PITCH_DEG = 0.0
 MAX_LOWER_TILT_DEG = 1.0    # ... and on the straight way down
 # --- touch-down ---
 PATH_STEP = 0.002       # m, one joint step while feeling for the table
@@ -223,7 +242,7 @@ ARRIVE_TOL_DEG = 1.0
 TOOL_FRAME_TOL = 0.015       # m, arm-reported tool pose vs URDF tool_frame
 MAX_AGE_MIN = 30.0           # a saved spot older than this is refused (the base may have moved)
 REQUIRED_SPEED = "low"
-ARM_JOINTS = [f"joint_{i}" for i in range(1, 8)]
+ARM_JOINTS = [f"joint_{i}" for i in range(1, 8)]   # + "arm_" on the 2026-10-19 nightly's URDF
 CONTINUOUS = [0, 2, 4, 6]
 UP = np.array([0.0, 0.0, 1.0])
 
@@ -232,23 +251,40 @@ UP = np.array([0.0, 0.0, 1.0])
 # Geometry (pure numpy -- tested offline in test_place_bowl.py)
 # ---------------------------------------------------------------------------
 
-def hand_orientation(heading):
-    """Level hand pointing along `heading`, rolled so the camera is on its right.
+def hand_orientation(heading, camera_left=False, pitch_deg=None):
+    """The hand pointing along `heading`, holding the bowl level, rolled so the camera is on its
+    right (camera_left: on its left -- the same hold turned 180 deg about the hand's axis), then
+    pointed pitch_deg down (default HOLD_PITCH_DEG).
 
-    tool z = heading (horizontal), tool y = the camera's side = right of the hand seen from
-    behind = heading x up, tool x = up. The camera sits on the tool's +y side
+    Level, camera right: tool z = heading (horizontal), tool y = the camera's side = right of
+    the hand seen from behind = heading x up, tool x = up. The camera sits on the tool's +y side
     (wrist_camera_calib: +6.3 cm along y), so with tool y = up it would be on top.
     """
     z = np.array([heading[0], heading[1], 0.0], dtype=float)
     z /= np.linalg.norm(z)
     y = np.cross(z, UP)
     x = np.cross(y, z)
-    return Rotation.from_matrix(np.column_stack([x, y, z])).as_quat()
+    if camera_left:
+        x, y = -x, -y
+    R = Rotation.from_matrix(np.column_stack([x, y, z]))
+    pitch = HOLD_PITCH_DEG if pitch_deg is None else pitch_deg
+    # about z x up (horizontal, across the hand): a negative turn brings the tip down
+    return (Rotation.from_rotvec(-np.radians(pitch) * np.cross(z, UP)) * R).as_quat()
+
+
+def camera_on_left(R):
+    """The hand's camera is on its left (tool x points down rather than up)."""
+    return bool(R[:, 0] @ UP < 0)
 
 
 def bowl_tilt_deg(R):
-    """How far the bowl is from level: tool x should point straight up."""
-    return float(np.degrees(np.arccos(np.clip(R[:, 0] @ UP, -1.0, 1.0))))
+    """How far the bowl is from how it should be held: tool x straight up (camera right) or down
+    (camera left), leaned forward by HOLD_PITCH_DEG when the hand points down."""
+    h = np.array([R[0, 2], R[1, 2], 0.0])
+    h = h / np.linalg.norm(h) if np.linalg.norm(h) > 1e-6 else np.zeros(3)
+    p = np.radians(HOLD_PITCH_DEG)
+    want = (UP * np.cos(p) + h * np.sin(p)) * (-1.0 if camera_on_left(R) else 1.0)
+    return float(np.degrees(np.arccos(np.clip(R[:, 0] @ want, -1.0, 1.0))))
 
 
 def approach_direction(spot):
@@ -331,26 +367,88 @@ def mount_rotation(up_base):
 # Arm model (PyBullet FK on the repo URDF, least-squares IK)
 # ---------------------------------------------------------------------------
 
+def kinematics_only(urdf):
+    """A copy of `urdf` without <visual> / <collision>, for pybullet: only the joints and links
+    are used here. The driver's model names its meshes by paths inside its container
+    (/opt/ros/humble/share/...), which pybullet can't find on the host -- a missing collision
+    mesh makes loadURDF fail (2026-10-19 nightly)."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(str(urdf))
+    root = tree.getroot()
+    for link in root.findall("link"):
+        for tag in ("visual", "collision"):
+            for el in link.findall(tag):
+                link.remove(el)
+    # Joints naming a link that isn't there (the nightly's gripper had one, 2026-10-19) make
+    # pybullet refuse the file: drop them, then every link no longer connected to the root. Only
+    # the arm chain is used here (the fingertip is a virtual link on the flange); a missing arm
+    # joint still fails loudly in ArmModel.
+    dropped = []
+    # The nightly's model (arm_ names): leave the whole gripper out -- its Robotiq links are never
+    # used here, and pybullet refused them even when every joint's links existed (2026-10-19).
+    if root.find("joint[@name='arm_joint_1']") is not None:
+        for el in root.findall("link") + root.findall("joint"):
+            if "robotiq" in el.get("name"):
+                root.remove(el)
+                dropped.append(el.get("name"))
+    links = {l.get("name") for l in root.findall("link")}
+    for j in root.findall("joint"):
+        if j.find("parent").get("link") not in links or j.find("child").get("link") not in links:
+            root.remove(j)
+            dropped.append(j.get("name"))
+    joints = root.findall("joint")
+    children = {j.find("child").get("link") for j in joints}
+    tops = [l for l in links if l not in children]
+    below = {}
+    for j in joints:
+        below.setdefault(j.find("parent").get("link"), []).append(j.find("child").get("link"))
+
+    def subtree(name):
+        return [name] + [n for c in below.get(name, []) for n in subtree(c)]
+    keep = set(max((subtree(t) for t in tops), key=len))
+    for l in root.findall("link"):
+        if l.get("name") not in keep:
+            root.remove(l)
+            dropped.append(l.get("name"))
+    for j in root.findall("joint"):
+        if j.find("parent").get("link") not in keep:
+            root.remove(j)
+            dropped.append(j.get("name"))
+    if dropped:
+        print(f"URDF: left out {len(dropped)} gripper / unconnected parts ({', '.join(dropped[:4])}"
+              f"{', ...' if len(dropped) > 4 else ''}); the arm chain is kept")
+    out = Path(tempfile.gettempdir()) / f"table_place_{Path(urdf).stem}_kinematics.urdf"
+    tree.write(out)
+    return str(out)
+
+
 class ArmModel:
     def __init__(self, urdf=ROBOT_URDF):
         import pybullet as p
         self.p = p
         self.cid = p.connect(p.DIRECT)
-        self.robot = p.loadURDF(str(urdf), useFixedBase=True, physicsClientId=self.cid)
+        self.robot = p.loadURDF(kinematics_only(urdf), useFixedBase=True, physicsClientId=self.cid)
         joints, links = {}, {}
         for i in range(p.getNumJoints(self.robot, physicsClientId=self.cid)):
             info = p.getJointInfo(self.robot, i, physicsClientId=self.cid)
             joints[info[1].decode()] = info
             links[info[12].decode()] = i
-        self.arm = [joints[name][0] for name in ARM_JOINTS]
+        # The 2026-10-19 nightly's model (/arm/robot_description) prefixes every arm link and
+        # joint with arm_, and its root is arm_mount -- the frame the driver's poses are in.
+        self.prefix = "arm_" if "arm_joint_1" in joints else ""
+        self.ee_link = self.prefix + "end_effector_link"
+        self.base_frame = "arm_mount" if self.prefix else "base_link"   # TF name of fk(base=True)
+        names = [self.prefix + n for n in ARM_JOINTS]
+        self.arm = [joints[name][0] for name in names]
         # (lower, upper) in rad; continuous joints come back as lower > upper.
-        self.limits = [(joints[name][8], joints[name][9]) for name in ARM_JOINTS]
+        self.limits = [(joints[name][8], joints[name][9]) for name in names]
         self.links = links
         # Everything the planner sees is in the LEVEL frame: the arm base frame turned so z is
         # true up (same origin). The arm itself takes base-frame commands; joint commands don't
         # care, and the few Cartesian ones convert with R_wb.
         self.R_wb, self.up_base = load_mount()
-        # Sheppy's URDF has neither tool_frame nor finger_tip: add them on end_effector_link's z
+        # Sheppy's URDF has neither tool_frame nor finger_tip: add them on the flange's z
         # axis (the driver's tool frame IS end_effector_link -- /ee_state matched it, 2026-10-08).
         self.virtual = {}
         if "tool_frame" not in links:
@@ -361,7 +459,7 @@ class ArmModel:
     def fk(self, q, link="tool_frame", base=False):
         """Pose of `link` in the level frame (base=True: in the arm's own base frame)."""
         if link in self.virtual:
-            T = self.fk(q, "end_effector_link", base)
+            T = self.fk(q, self.ee_link, base)
             T[:3, 3] += self.virtual[link] * T[:3, 2]
             return T
         for j, v in zip(self.arm, q):
@@ -638,11 +736,14 @@ def plan_place(model, q_now, record=None, here=False, max_drop=MAX_DROP, bowl_de
     heading[2] = 0.0
     if np.linalg.norm(heading) < 0.3:
         raise Refused("the hand points too steeply up or down to tell which way it faces")
-    adjust_quat = hand_orientation(heading)
+    # Square up to the NEAREST hold: the camera stays on whichever side it is (never a half turn).
+    left = camera_on_left(T_now[:3, :3])
+    adjust_quat = hand_orientation(heading, left)
     adjust_deg = float(np.degrees((Rotation.from_matrix(T_now[:3, :3]) * Rotation.from_quat(adjust_quat).inv()).magnitude()))
     if adjust_deg > max_adjust:
-        raise Refused(f"the hand is {adjust_deg:.0f} deg from level + camera-on-the-right "
-                      f"(max {max_adjust:.0f} to correct with a bowl in it) -- re-grip it closer, "
+        raise Refused(f"the hand is {adjust_deg:.0f} deg from holding the bowl "
+                      + (f"{HOLD_PITCH_DEG:.0f} deg down " if HOLD_PITCH_DEG else "level ")
+                      + f"(max {max_adjust:.0f} to correct with a bowl in it) -- re-grip it closer, "
                       "or with an EMPTY gripper pass --max-adjust")
 
     table_z = None if here else record["table_z"]
@@ -657,7 +758,7 @@ def plan_place(model, q_now, record=None, here=False, max_drop=MAX_DROP, bowl_de
     else:
         spot = np.asarray(record["spot"])
         approach = approach_direction(spot)
-        quat = hand_orientation(approach)
+        quat = hand_orientation(approach, left)
         safe_z = table_z + SAFE_HEIGHT
         if T_now[2, 3] < safe_z - 0.01:
             lift = T_now[:3, 3].copy()
@@ -679,7 +780,7 @@ def plan_place(model, q_now, record=None, here=False, max_drop=MAX_DROP, bowl_de
                                         table_z=table_z, transit_pos=above)
         moves += final
     info = dict(adjust_deg=adjust_deg, approach=approach, table_z=table_z, floor_z=floor_z,
-                impedance=impedance)
+                impedance=impedance, camera_left=left)
     return moves, descent, info
 
 
@@ -768,7 +869,7 @@ def grab_frames(depth_topic, info_topic, color_topic, n=1, period=0.2, timeout_s
 
 def self_distance(points, model, q):
     """Distance from each point to our own gripper (segment flange -> fingertip) at joints q."""
-    a = model.fk(q, "end_effector_link")[:3, 3]
+    a = model.fk(q, model.ee_link)[:3, 3]
     b = model.fk(q, "finger_tip")[:3, 3]
     ab = b - a
     s = np.clip((points - a) @ ab / (ab @ ab), 0.0, 1.0)
@@ -849,15 +950,15 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
         q = np.asarray(wait_still(arm)["position"], dtype=float)
         print(f"\nscanning {frames} frames, {period:.1f} s apart ...")
         intr, shots, cam_tf = grab_frames(depth_topic, info_topic, color_topic, n=frames, period=period,
-                                          tf_to="base_link" if scene else None)
+                                          tf_to=model.base_frame if scene else None)
         q_after = np.asarray(arm.get_state()["position"], dtype=float)
         if np.max(np.abs(wrap_deg(q_after - q))) > 0.5:
             sys.exit("The arm moved while the frames were taken -- hold it still and retry.")
         if scene:
-            # base_link <- camera from TF, turned into the level frame (same origin, z true up).
+            # arm base (base_link / arm_mount) <- camera from TF, turned into the level frame (same origin, z true up).
             R, t = model.R_wb @ cam_tf[0], model.R_wb @ cam_tf[1]
         else:
-            T_base_cam = model.fk(q, "end_effector_link") @ calib
+            T_base_cam = model.fk(q, model.ee_link) @ calib
             R, t = T_base_cam[:3, :3], T_base_cam[:3, 3]
         print(f"camera at {np.round(t, 3).tolist()} m in the level frame, "
               f"looking {np.degrees(np.arccos(np.clip(-R[2, 2], -1, 1))):.0f} deg off straight down")
@@ -986,17 +1087,20 @@ def print_plan(model, moves, descent, info):
         print(f"lower      one continuous move at {SLIDE_SPEED * 100:.0f} cm/s from z={zs[0]:.3f} down to at most "
               f"{zs[-1]:.3f}{floor} ({(zs[0] - zs[-1]) * 100:.0f} cm), stopping when it feels the table; "
               "then opens and pulls out (no prompt)")
-    print(f"adjust turns the hand {info['adjust_deg']:.1f} deg")
+    print(f"adjust turns the hand {info['adjust_deg']:.1f} deg (camera on the "
+          f"{'left' if info.get('camera_left') else 'right'}; bowl held "
+          + (f"{HOLD_PITCH_DEG:.1f} deg down" if HOLD_PITCH_DEG else "level")
+          + "; 'bowl tilt' = off from that)")
 
 
 def joint_move(arm, q, name):
     """Position-controlled joint move + arrival check (like scan_pose.py)."""
     current = np.asarray(arm.get_state()["position"], dtype=float)
-    raw = np.degrees(q - current)
-    for i in CONTINUOUS:
-        if abs(raw[i]) > 180.0:
-            print(f"WARNING: J{i + 1} is {raw[i]:+.1f} deg away as raw numbers -- watch it "
-                  "doesn't spin the long way.")
+    # The plan is in [-180, 180); the arm may report a continuous joint a whole turn off. Send
+    # the short way round (what the plan checked) -- raw numbers turned the hand 360 deg on
+    # 2026-10-19.
+    q = np.asarray(q, dtype=float).copy()
+    q[CONTINUOUS] = current[CONTINUOUS] + wrap(q[CONTINUOUS] - current[CONTINUOUS])
     print(f"-> {name}")
     arm.set_joint_position([float(v) for v in q])
     final = np.asarray(wait_still(arm)["position"], dtype=float)
@@ -1193,15 +1297,15 @@ def lower_compliant(arm, model, descent):
 def ee_force_z(model, q, tau, eps=1e-4):
     """The hand's z force (N, base z), estimated from the joint torques: the wrench at
     end_effector_link that tau would balance, tau = J^T w (least squares; numerical Jacobian of
-    the URDF). Includes gravity -- callers compare changes. /ee_state has no wrench: the driver
-    has no force estimate of its own."""
+    the URDF). Includes gravity -- callers compare changes. The fallback for drivers whose
+    /ee_state has no wrench (kinova_arm prefers the driver's own when it is there)."""
     q = np.asarray(q, dtype=float)
-    T0 = model.fk(q, "end_effector_link", base=True)
+    T0 = model.fk(q, model.ee_link, base=True)
     J = np.zeros((6, 7))
     for i in range(7):
         dq = q.copy()
         dq[i] += eps
-        T = model.fk(dq, "end_effector_link", base=True)
+        T = model.fk(dq, model.ee_link, base=True)
         J[:3, i] = (T[:3, 3] - T0[:3, 3]) / eps
         J[3:, i] = Rotation.from_matrix(T[:3, :3] @ T0[:3, :3].T).as_rotvec() / eps
     w = np.linalg.lstsq(J.T, np.asarray(tau, dtype=float), rcond=None)[0]
@@ -1210,13 +1314,13 @@ def ee_force_z(model, q, tau, eps=1e-4):
 
 def lower_until_still(arm, model, descent, table_z, bowl_depth):
     """Kinova backend: the planned straight line down in the driver's IMPEDANCE mode; contact =
-    the hand's z force (from the joint torques, ee_force_z) changes a lot (see
+    the hand's z force (the driver's /ee_state wrench, else ee_force_z) changes a lot (see
     kinova_arm.lower_line_until_contact). Returns the tool z; raises Refused (bowl NOT let go)
     if nothing stopped it or it stopped well above the table."""
     zs, qs = descent
     print(f"lowering: straight line down in IMPEDANCE mode (profile {LOWER_PROFILE}) at "
-          f"{SLIDE_SPEED * 100:.0f} cm/s, aimed as low as z={float(zs[-1]):.3f}; stops when the hand's z "
-          "force changes")
+          f"{SLIDE_SPEED * 100:.0f} cm/s, aimed as low as z={float(zs[-1]):.3f}; stops on contact "
+          f"({os.environ.get('TABLE_CONTACT', 'velocity')} test)")
     contact = arm.lower_line_until_contact([[float(v) for v in q] for q in qs],
                                            step_s=PATH_STEP / SLIDE_SPEED,
                                            z_planned=[model.fk(q, base=True)[2, 3] for q in qs],
@@ -1242,7 +1346,7 @@ def run_compliant_goto(arm, model, moves):
     checked) joint targets, HOLD_LEVEL at GOTO_SPEED_SCALE. The "adjust" turn in place stays our
     joint move. The lowering is separate (lower_until_still, or slide_down with --torque)."""
     def pose(q):
-        T = model.fk(q, base=True)          # go_to_ee_pose takes base_link poses
+        T = model.fk(q, base=True)          # go_to_ee_pose takes arm-base poses (base_link / arm_mount)
         return T[:3, 3], Rotation.from_matrix(T[:3, :3]).as_quat()
 
     for name, q in moves:
@@ -1287,6 +1391,48 @@ def manual_spot(x, y, table_z, up_base, source):
                 spot=[float(x), float(y), float(table_z)], up_base=np.asarray(up_base, dtype=float).tolist())
 
 
+def status(args):
+    """Print where the hand is and how it holds the bowl (nothing moves)."""
+    global HOLD_PITCH_DEG
+    HOLD_PITCH_DEG = float(args.tilt)
+    try:
+        arm = connect_arm()
+    except OSError as e:
+        sys.exit(f"Cannot reach the arm ({e}).")
+    model = ArmModel()
+    state = arm.get_state()
+    q = np.asarray(state["position"], dtype=float)
+    T = model.fk(q)
+    R = T[:3, :3]
+    print("joints (deg):  " + "  ".join(f"J{i + 1} {np.degrees(v):7.1f}" for i, v in enumerate(q)))
+    print(f"tool (flange): x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f} m (level frame, "
+          f"{model.base_frame}), {np.hypot(T[0, 3], T[1, 3]):.2f} m from the base axis")
+    tip = model.fk(q, "finger_tip")[:3, 3]
+    print(f"fingertips:    x={tip[0]:.3f} y={tip[1]:.3f} z={tip[2]:.3f} m")
+    z = R[:, 2]
+    pitch = np.degrees(np.arcsin(np.clip(-z @ UP, -1, 1)))
+    left = camera_on_left(R)
+    heading = np.degrees(np.arctan2(z[1], z[0]))
+    print(f"hand points {pitch:+.1f} deg {'down' if pitch >= 0 else 'UP'} from horizontal, toward "
+          f"{heading:+.0f} deg (0 = straight ahead, + = left); camera on the {'left' if left else 'right'}")
+    # roll: how far the hand is turned about its own axis from a level hold
+    h = np.array([z[0], z[1], 0.0])
+    if np.linalg.norm(h) > 1e-6:
+        side = np.cross(h / np.linalg.norm(h), UP)          # level hold: tool y along this (camera right)
+        y = R[:, 1] * (-1.0 if left else 1.0)
+        roll = np.degrees(np.arctan2(np.cross(side, y) @ z, side @ y))
+        print(f"roll about the hand's axis: {roll:+.1f} deg from a level hold")
+        want = hand_orientation(h, left)
+        off = np.degrees((Rotation.from_matrix(R) * Rotation.from_quat(want).inv()).magnitude())
+        print(f"place --tilt {HOLD_PITCH_DEG:g} would turn the hand {off:.1f} deg "
+              f"(max {MAX_ADJUST_DEG:.0f} with a bowl in it)")
+    if state.get("gripper_pos") is not None:
+        print(f"gripper: {state['gripper_pos']:.3f} (0 = open, 1 = closed)")
+    if getattr(arm, "ee_wrench", False) and arm.d.ee_state is not None:
+        f = arm.d.ee_state.wrench.force
+        print(f"force on the hand: x={f.x:+.1f} y={f.y:+.1f} z={f.z:+.1f} N ({arm.frame}; the at-rest value drifts with the pose -- compare changes)")
+
+
 def mark(args):
     """Save where the fingertip is now as the spot: touch the target on the table with it first."""
     try:
@@ -1324,6 +1470,10 @@ def check_spot(record, max_age, require_confirmed=True):
 
 def place(args, record=None):
     """record: the spot to use (place_at); None reads SPOT_FILE (or none with --here)."""
+    global HOLD_PITCH_DEG
+    if not 0.0 <= args.tilt <= MAX_HOLD_PITCH_DEG:
+        sys.exit(f"--tilt {args.tilt:g}: 0 to {MAX_HOLD_PITCH_DEG:.0f} deg")
+    HOLD_PITCH_DEG = float(args.tilt)
     model = ArmModel()
     kinova = BACKEND == "kinova"
     if args.impedance and kinova:
@@ -1365,6 +1515,10 @@ def place(args, record=None):
     reported = np.asarray(state["ee_pos"][:3], dtype=float)
     modelled = model.fk(q_now, base=True)[:3, 3]
     off = float(np.linalg.norm(reported - modelled))
+    if BACKEND == "kinova" and getattr(arm, "prefix", "") != model.prefix:
+        sys.exit(f"The driver uses {'arm_' if arm.prefix else 'unprefixed'} joint names but {ROBOT_URDF.name} "
+                 f"is the {'new' if model.prefix else 'old'} model. Save the driver's model again: "
+                 "python3 save_urdf.py")
     print(f"tool frame: arm says {np.round(reported, 3).tolist()}, URDF says "
           f"{np.round(modelled, 3).tolist()} ({off * 100:.1f} cm apart)")
     if off > TOOL_FRAME_TOL:
@@ -1373,7 +1527,9 @@ def place(args, record=None):
     gripper = float(state.get("gripper_pos"))
     print(f"gripper: {gripper:.3f} (0 = open, 1 = closed)")
     if gripper < 0.05:
-        sys.exit("The gripper is fully open -- it isn't holding the bowl.")
+        if not args.here:
+            sys.exit("The gripper is fully open -- it isn't holding the bowl.")
+        print("NOTE: the gripper is open -- fine for an empty-gripper test (--here)")
 
     try:
         moves, descent, info = plan_place(model, q_now, record, here=args.here, max_drop=args.max_drop,
@@ -1406,12 +1562,15 @@ def place(args, record=None):
         sys.exit(f"Speed preset is '{speed}', not '{REQUIRED_SPEED}'. Run:\n"
                  f"  python3 ~/feeding-deployment/scripts/session/arm_set_speed.py {REQUIRED_SPEED}")
     confirm("Area clear, bowl gripped, hand on the e-stop? [ENTER] to start")
+    SPOT_DIR.mkdir(parents=True, exist_ok=True)
+    START_FILE.write_text(json.dumps(dict(q=[float(v) for v in q_now], tilt=HOLD_PITCH_DEG,
+                                          time=time.time()), indent=2))
 
     compliant_goto = kinova and arm.compliant_goto
     still = kinova and not args.torque and not args.steps
     print("moves: " + ("go_to_ee_pose (nightly driver: speed_scale, HOLD_LEVEL)" if compliant_goto
                        else "planned joint moves") + "; lowering: "
-          + ("impedance, stop on the hand's z force" if still else "touch sensing (joint torques)"))
+          + ("impedance, stop on contact" if still else "touch sensing (joint torques)"))
     try:
         if compliant_goto:
             run_compliant_goto(arm, model, moves)
@@ -1420,7 +1579,7 @@ def place(args, record=None):
                 joint_move(arm, q, name)
         T = model.fk(np.asarray(arm.get_state()["position"], dtype=float))
         if bowl_tilt_deg(T[:3, :3]) > 1.0:
-            raise Refused(f"STOPPED: bowl is {bowl_tilt_deg(T[:3, :3]):.1f} deg from level after the moves")
+            raise Refused(f"STOPPED: bowl is {bowl_tilt_deg(T[:3, :3]):.1f} deg off its hold after the moves")
         if still:
             lower_until_still(arm, model, descent, None if args.here else record["table_z"],
                               args.bowl_depth)
@@ -1435,17 +1594,202 @@ def place(args, record=None):
 
     # Contact was confirmed standing still (a false alarm carries on down instead), so let go
     # and pull out right away -- no prompt.
-    print("opening the gripper ...")
-    arm.open_gripper()
-    time.sleep(0.5)
+    phase = getattr(arm, "set_phase", lambda name: None)    # names the steps in the recording
+    try:
+        print("opening the gripper ...")
+        phase("open")
+        try:
+            arm.open_gripper()
+        except RuntimeError as e:
+            # Still closed on the bowl: backing out would drag it. Stay put; a person decides.
+            sys.exit(f"STOPPED, hand NOT backed out: {e}. Open it by hand, then: python3 place_bowl.py retreat --execute")
+        time.sleep(0.5)
+        # The impedance lowering leaves the arm IN impedance (switching out jerked it): back out
+        # in impedance too, and leave it there.
+        phase("retreat")
+        back_out(arm, model, compliant_goto, impedance=still)
+        phase("done")
+        time.sleep(0.5)
+    finally:
+        if hasattr(arm, "stop_log"):
+            arm.stop_log()
+    print("Done: bowl placed, hand clear." + (" The arm is still in impedance mode." if still else ""))
+    if args.reset:
+        confirm("[ENTER] to go back up to the start position")
+        go_to_start(arm, model, impedance=still)
+
+
+def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP):
+    """Joint waypoints every `step` along the straight horizontal line RETREAT back from
+    q_start's tool pose (back = opposite the hand's heading, level frame), orientation kept.
+    release: also lift that much over the first RETREAT_RELEASE of it (letting go of the press
+    gently instead of at once). Returns the joint arrays; the first is q_start."""
+    T = model.fk(q_start)
+    quat = Rotation.from_matrix(T[:3, :3]).as_quat()
+    back = -np.array([T[0, 2], T[1, 2], 0.0])
+    if np.linalg.norm(back) < 0.3:
+        raise Refused("retreat: the hand points too steeply up or down to tell which way is back")
+    back /= np.linalg.norm(back)
+    n = max(1, int(np.ceil(RETREAT / step)))
+    qs, seed = [np.asarray(q_start, dtype=float)], np.asarray(q_start, dtype=float)
+    for k in range(1, n + 1):
+        f = k / n
+        pos = T[:3, 3] + f * RETREAT * back + min(1.0, f / RETREAT_RELEASE) * release * UP
+        q = model.ik(pos, quat, seed, restarts=0, stay=0.01)
+        if q is None or np.max(np.abs(wrap_deg(q - seed))) > 3.0 * step / PATH_STEP:
+            raise Refused(f"retreat: can't go straight back from here ({f * RETREAT * 100:.0f} cm in)")
+        qs.append(q)
+        seed = q
+    return qs
+
+
+def back_out(arm, model, compliant_goto, impedance=False):
+    """Pull the hand RETREAT straight back (horizontal), keeping its orientation.
+    impedance (kinova backend): along a line WE plan (plan_retreat), as an impedance joint
+    trajectory -- go_to_ee_pose let cuRobo choose the path, and the hand rose on the way
+    (2026-10-19). It starts at the hold's setpoint (HOLD_PRESS into the table) and lifts that
+    back over its first quarter, so the press lets go gently. Otherwise go_to_ee_pose."""
+    if impedance and hasattr(arm, "follow_line"):
+        hold_q = getattr(arm, "hold_q", None)
+        q0 = np.asarray(hold_q if hold_q is not None else arm.get_state()["position"], dtype=float)
+        try:
+            line = plan_retreat(model, q0, release=HOLD_PRESS if hold_q is not None else 0.0)
+        except Refused as e:
+            sys.exit(f"STOPPED (gripper open, hand not backed out): {e}")
+        print(f"-> retreat ({RETREAT * 100:.0f} cm straight back along a planned line, impedance, "
+              f"{RETREAT_SPEED * 100:.0f} cm/s)")
+        code = arm.follow_line([[float(v) for v in q] for q in line], step_s=RETREAT_STEP / RETREAT_SPEED,
+                               profile=LOWER_PROFILE)
+        if code != 0:
+            sys.exit(f"STOPPED: the retreat did not complete (driver error {code})")
+        wait_still(arm)
+        return
     for name, pos, quat in retreat_poses(arm.get_state()["ee_pos"], model.R_wb):
-        print(f"-> {name}")
+        print(f"-> {name} ({RETREAT * 100:.0f} cm straight back{', impedance' if impedance else ''})")
         if compliant_goto:   # keep the hand's orientation, slowly, so the fingers slide off the lip
-            arm.set_ee_pose(pos.tolist(), quat.tolist(), hold=HOLD_FIXED, speed_scale=GOTO_SPEED_SCALE)
+            code = arm.set_ee_pose(pos.tolist(), quat.tolist(), hold=HOLD_FIXED, speed_scale=GOTO_SPEED_SCALE,
+                                   impedance=impedance, profile=LOWER_PROFILE if impedance else None)
+            if code != 0:
+                sys.exit(f"STOPPED: the retreat did not complete (go_to_ee_pose error {code})")
         else:
             arm.set_ee_pose(pos.tolist(), quat.tolist())
         wait_still(arm)
-    print("Done: bowl placed, hand clear.")
+
+
+def reset_moves(model, q_now, q_start):
+    """Back to the place's start: straight UP to the start's height first (the open fingers
+    rise clear of the bowl instead of sweeping across it), then one joint move to the start's
+    joints. Checked like the place's own moves; raises Refused."""
+    T_now, T_start = model.fk(q_now), model.fk(q_start)
+    moves, q = [], np.asarray(q_now, dtype=float)
+    if T_start[2, 3] - T_now[2, 3] > 0.005:
+        up = T_now[:3, 3].copy()
+        up[2] = T_start[2, 3]
+        moves = plan_segment(model, q, up, Rotation.from_matrix(T_now[:3, :3]).as_quat(), None, "up")
+        q = moves[-1][1]
+    problems = check_joint_move(model, q, q_start, None)
+    jump = float(np.max(np.abs(wrap_deg(np.asarray(q_start) - q))))
+    if problems or jump > MAX_STEP_JUMP_DEG:
+        raise Refused("back to the start: " + ("; ".join(problems) or f"a joint moves {jump:.0f} deg"))
+    return moves + [("start", np.asarray(q_start, dtype=float))]
+
+
+def go_to_start(arm, model, impedance=False):
+    """Plan and run reset_moves to START_FILE's joints (in impedance on the kinova backend)."""
+    global HOLD_PITCH_DEG
+    if not START_FILE.exists():
+        sys.exit(f"No start position saved ({START_FILE}). Put the hand where tests should start, "
+                 "then: python3 place_bowl.py reset --save")
+    record = json.loads(START_FILE.read_text())
+    HOLD_PITCH_DEG = float(record.get("tilt", 0.0))
+    q_now = np.asarray(wait_still(arm)["position"], dtype=float)
+    try:
+        moves = reset_moves(model, q_now, np.asarray(record["q"], dtype=float))
+    except Refused as e:
+        sys.exit(f"REFUSED: {e}")
+    for name, q in moves:
+        T = model.fk(q)
+        print(f"-> {name}: hand to x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f}"
+              + (" (impedance)" if impedance else ""))
+        if impedance:
+            arm.set_joint_position([float(v) for v in q], impedance=True, profile=LOWER_PROFILE)
+            final = np.asarray(wait_still(arm)["position"], dtype=float)
+            off = float(np.max(np.abs(wrap_deg(q - final))))
+            if off > RESET_TOL_DEG:
+                sys.exit(f"STOPPED: {name} ended {off:.1f} deg off")
+        else:
+            joint_move(arm, q, name)
+    # Ready for the next test: close the gripper up here, clear of the bowl.
+    if hasattr(arm, "close_gripper"):
+        print("closing the gripper ...")
+        try:
+            arm.close_gripper()
+        except RuntimeError as e:
+            print(f"NOTE: {e}")
+    print("Back at the start position.")
+
+
+def reset(args):
+    """Go back to where the last place --execute started (dry run unless --execute)."""
+    global HOLD_PITCH_DEG
+    try:
+        arm = connect_arm()
+    except OSError as e:
+        sys.exit(f"Cannot reach the arm ({e}).")
+    model = ArmModel()
+    if args.save:
+        q = np.asarray(wait_still(arm)["position"], dtype=float)
+        SPOT_DIR.mkdir(parents=True, exist_ok=True)
+        START_FILE.write_text(json.dumps(dict(q=[float(v) for v in q], tilt=PLACE_PITCH_DEG,
+                                              time=time.time()), indent=2))
+        T = model.fk(q)
+        print(f"saved the start position: hand at x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f} "
+              f"-> {START_FILE}. reset --execute comes back here.")
+        return
+    if not START_FILE.exists():
+        sys.exit(f"No start position saved ({START_FILE}). Put the hand where tests should start, "
+                 "then: python3 place_bowl.py reset --save")
+    record = json.loads(START_FILE.read_text())
+    HOLD_PITCH_DEG = float(record.get("tilt", 0.0))
+    q_now = np.asarray(wait_still(arm)["position"], dtype=float)
+    try:
+        moves = reset_moves(model, q_now, np.asarray(record["q"], dtype=float))
+    except Refused as e:
+        sys.exit(f"REFUSED: {e}")
+    age = (time.time() - record.get("time", time.time())) / 60
+    print(f"start position saved {age:.0f} min ago")
+    for name, q in moves:
+        T = model.fk(q)
+        print(f"{name:6s} hand to x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f}")
+    if not args.execute:
+        print("DRY RUN -- add --execute to move.")
+        return
+    confirm("Clear around the hand, hand on the e-stop? [ENTER] to go back to the start")
+    go_to_start(arm, model, impedance=BACKEND == "kinova")
+
+
+def retreat(args):
+    """Only the last step of place: pull the hand straight back (after an interrupted place)."""
+    try:
+        arm = connect_arm()
+    except OSError as e:
+        sys.exit(f"Cannot reach the arm ({e}).")
+    model = ArmModel()
+    state = wait_still(arm)
+    g = state.get("gripper_pos")
+    print(f"gripper: {'?' if g is None else f'{g:.2f}'} (0 = open)")
+    if g is not None and g > OPEN_STALLED_PLACE:
+        sys.exit("The gripper is still closed -- backing out would drag what it holds. Open it first.")
+    for name, pos, _quat in retreat_poses(state["ee_pos"], model.R_wb):
+        print(f"{name}: hand from {np.round(state['ee_pos'][:3], 3).tolist()} to {np.round(pos, 3).tolist()} "
+              f"({RETREAT * 100:.0f} cm straight back, same orientation)")
+    if not args.execute:
+        print("DRY RUN -- add --execute to move.")
+        return
+    confirm("Clear behind the hand, hand on the e-stop? [ENTER] to back out")
+    compliant_goto = BACKEND == "kinova" and arm.compliant_goto
+    back_out(arm, model, compliant_goto, impedance=compliant_goto)   # as place leaves it: impedance
+    print("Done: hand backed out.")
 
 
 def level(args):
@@ -1509,11 +1853,25 @@ def build_parser():
                         help="skip planes farther than this from the camera, m (default: per camera)")
     p_level = sub.add_parser("level", help="record true up: hold the hand truly level, camera on the right")
     p_level.add_argument("--clear", action="store_true", help="forget it (base z = up again)")
+    p_reset = sub.add_parser("reset", help="go back to the saved start position, then close the gripper "
+                                           "(straight up, then there)")
+    p_reset.add_argument("--execute", action="store_true", help="actually move")
+    p_reset.add_argument("--save", action="store_true",
+                         help="no motion: save where the arm is now as the start position")
+    p_reset.add_argument("--yes", action="store_true", help="skip the [ENTER] prompt")
+    p_retreat = sub.add_parser("retreat", help="pull the hand 8 cm straight back (after an interrupted place)")
+    p_retreat.add_argument("--execute", action="store_true", help="actually move")
+    p_retreat.add_argument("--yes", action="store_true", help="skip the [ENTER] prompt")
+    p_status = sub.add_parser("status", help="where the hand is, how it's turned, the gripper (no motion)")
+    p_status.add_argument("--tilt", type=float, default=PLACE_PITCH_DEG,
+                          help="compare with this place --tilt (default %(default)g)")
     sub.add_parser("mark", help="save the fingertip's position as the spot: touch the target on the "
                                 "table with the fingertip first (no motion)")
     p_place = sub.add_parser("place", help="put the held bowl down (dry run unless --execute)")
     p_place.add_argument("--execute", action="store_true", help="actually move")
     p_place.add_argument("--yes", action="store_true", help="skip the [ENTER] prompts")
+    p_place.add_argument("--reset", action="store_true",
+                         help="after placing: [ENTER], then back up to where the hand started")
     p_place.add_argument("--here", action="store_true",
                          help="no spot: adjust, then lower straight down from where the hand is")
     p_place.add_argument("--at", type=float, nargs=2, metavar=("X", "Y"),
@@ -1534,6 +1892,10 @@ def build_parser():
     p_place.add_argument("--max-adjust", type=float, default=MAX_ADJUST_DEG,
                          help="largest squaring turn allowed, deg (default %(default).0f; raise it "
                               "only with an EMPTY gripper -- the turn tips a held bowl)")
+    p_place.add_argument("--tilt", type=float, default=PLACE_PITCH_DEG,
+                         help="hold the hand this many deg pointing down while placing, so the bowl "
+                              f"touches the table before the fingers (0-{MAX_HOLD_PITCH_DEG:.0f}, "
+                              "default %(default)g; 0 = level)")
     p_place.add_argument("--bowl-depth", type=float, default=BOWL_DEPTH,
                          help="lip to bowl bottom, m (default %(default).2f)")
     p_place.add_argument("--max-age", type=float, default=MAX_AGE_MIN,
@@ -1547,7 +1909,8 @@ def main():
     global ARGS
     ARGS = build_parser().parse_args()
     ARGS.yes = getattr(ARGS, "yes", False)
-    {"look": look, "level": level, "mark": mark, "place": place}[ARGS.cmd](ARGS)
+    {"look": look, "level": level, "mark": mark, "place": place, "status": status,
+     "retreat": retreat, "reset": reset}[ARGS.cmd](ARGS)
 
 
 ARGS = None
