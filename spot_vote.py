@@ -6,7 +6,9 @@ averaging and the checks run offline: python3 test_spot_vote.py
 combine_spots   the spot found in each frame -> drop the outliers, average the rest, or refuse
 grid_clearance  is the averaged spot still clear in one frame's free-space grid?
 confirm_image   the picture: table red, objects yellow, every frame's spot, the final circle, buttons
-ask             Confirm / Rescan / Cancel, by mouse or keys; a terminal prompt when there's no display
+ask             Confirm / Rescan / Cancel, by mouse or keys; a terminal prompt when there's no display.
+                allow_pick: a click on the picture (or "at X Y" typed) chooses the spot by hand
+click_to_table  a clicked pixel -> the point on the table plane under it
 """
 import os
 import sys
@@ -103,13 +105,27 @@ def _draw_x(img, center, axes, intrinsics, color, size=0.02, width=3):
         _draw_polyline(img, uv, ok, color, width)
 
 
-def confirm_image(base, intrinsics, axes, candidates, inliers, spot, radius, lines, can_confirm=True):
+def click_to_table(u, v, intrinsics, plane_model):
+    """Camera-frame point on the plane a*x + b*y + c*z + d = 0 (table_detect's "model") seen at
+    pixel (u, v), or None if that pixel's ray doesn't meet the plane in front of the camera."""
+    ray = np.array([(u - intrinsics["cx"]) / intrinsics["fx"], (v - intrinsics["cy"]) / intrinsics["fy"], 1.0])
+    model = np.asarray(plane_model, dtype=float)
+    denom = model[:3] @ ray
+    if abs(denom) < 1e-9:
+        return None
+    s = -model[3] / denom
+    return None if s <= 0 else s * ray
+
+
+def confirm_image(base, intrinsics, axes, candidates, inliers, spot, radius, lines, can_confirm=True,
+                  rejected=None):
     """RGB picture for the confirm window.
 
     base        HxWx3 RGB, already showing the table (red) and objects (yellow)
     candidates  Nx3 camera-frame spots, one per frame that found one; inliers: bool per spot
     spot        final camera-frame spot (None if refused); radius: its circle (m)
     lines       text shown top-left
+    rejected    a spot chosen by hand that didn't pass (camera frame): drawn as a red X
     """
     img = np.ascontiguousarray(base[..., :3].astype(np.uint8).copy())
     h, w = img.shape[:2]
@@ -120,6 +136,8 @@ def confirm_image(base, intrinsics, axes, candidates, inliers, spot, radius, lin
             _draw_x(img, c, axes, intrinsics, RED)
     if spot is not None:
         draw_placement(img, dict(point=spot, radius=radius, axes=axes), intrinsics, color=GREEN, width=4)
+    if rejected is not None:
+        _draw_x(img, np.asarray(rejected, dtype=float), axes, intrinsics, RED, size=0.03, width=4)
     img = np.concatenate([img, np.full((BAR, w, 3), 40, np.uint8)], axis=0)
     try:
         import cv2
@@ -146,15 +164,19 @@ def has_display():
     return True
 
 
-def ask(img, can_confirm=True, window=True, title="bowl spot"):
+def ask(img, can_confirm=True, window=True, title="bowl spot", allow_pick=False):
     """'confirm', 'rescan' or 'cancel'. Window: click a button, or Enter / R / Esc.
-    Without a display (e.g. over plain ssh) or with window=False: a terminal prompt."""
+    Without a display (e.g. over plain ssh) or with window=False: a terminal prompt.
+    allow_pick: also ("pick", (u, v)) for a click on the picture, or ("at", (x, y)) for
+    "at X Y" typed at the prompt (level frame, m) -- the caller checks the spot and asks again."""
     if window and has_display():
         try:
-            return _ask_window(img, can_confirm, title)
+            return _ask_window(img, can_confirm, title, allow_pick)
         except Exception as e:        # cv2 without GUI support, or the window can't open
             print(f"(no window: {e}; asking here instead)")
     options = "[c]onfirm / [r]escan / [q]uit" if can_confirm else "[r]escan / [q]uit"
+    if allow_pick:
+        options += ' / "at X Y" (choose the spot, m)'
     while True:
         try:
             answer = input(f"{options}? ").strip().lower()
@@ -166,9 +188,16 @@ def ask(img, can_confirm=True, window=True, title="bowl spot"):
             return "rescan"
         if answer in ("q", "quit", "cancel"):
             return "cancel"
+        words = answer.replace(",", " ").split()
+        if allow_pick and len(words) == 3 and words[0] == "at":
+            try:
+                return "at", (float(words[1]), float(words[2]))
+            except ValueError:
+                pass
+            print("  at X Y: two numbers in metres, e.g.  at 0.80 0.10")
 
 
-def _ask_window(img, can_confirm, title):
+def _ask_window(img, can_confirm, title, allow_pick=False):
     import cv2
     h = img.shape[0] - BAR
     rects = button_rects(img.shape[1], h)
@@ -176,6 +205,9 @@ def _ask_window(img, can_confirm, title):
 
     def on_mouse(event, x, y, *_):
         if event == cv2.EVENT_LBUTTONUP:
+            if allow_pick and y < h:
+                choice["v"] = ("pick", (x, y))      # a click on the picture: put the bowl here
+                return
             for name, (x0, y0, x1, y1) in rects.items():
                 if x0 <= x <= x1 and y0 <= y <= y1 and (can_confirm or name != "confirm"):
                     choice["v"] = name

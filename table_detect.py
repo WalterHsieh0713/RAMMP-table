@@ -409,6 +409,10 @@ def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS
     else:
         dist_obstacle = np.full(free.shape, np.inf)
     clearance = np.where(free, np.minimum(dist_edge, dist_obstacle), 0.0)
+    # The grid, kept even when no spot fits: a spot chosen by hand (place_bowl look, a click)
+    # is checked against it (spot_vote.grid_clearance).
+    table_result["grid"] = dict(free=free, axes=(ex, ey), origin=origin, cell_size=float(cell),
+                                grid_origin=(float(a0), float(b0)))
 
     need_edge = bowl_radius + edge_margin
     need_obstacle = bowl_radius + margin

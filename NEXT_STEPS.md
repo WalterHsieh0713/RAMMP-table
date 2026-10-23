@@ -1,7 +1,8 @@
-# What to do next (updated 2026-10-19)
+# What to do next (updated 2026-10-23)
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
-**`PROGRESS_2026-10-19.md`** (impedance placing on the HERL chair works, `--here`). Design:
+`PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
+**`PROGRESS_2026-10-23.md`** (choose the spot by clicking; **the full list of what to test**). Design:
 `PLAN_2026-10-06_scene_camera.md`.
 
 ## Next session: put the bowl down at a chosen spot
@@ -14,7 +15,9 @@ Most of it exists from the old rig; it hasn't been run on the HERL chair or with
   origin on the arm base axis, x forward, y left).
 - `mark`: touch the target with the fingertip; it saves that point (and the table height) as the
   spot. Then `place` with no arguments goes there.
-- `look`: the scene camera picks a clear spot; Confirm in the window or terminal.
+- `look`: the scene camera suggests a clear spot; **click the table to choose another** (or type
+  `at X Y` at the terminal prompt). It checks the bowl fits there in most frames and is in
+  reach, then Confirm saves it. Not tried on the robot yet.
 
 The steps `place` takes to a spot: adjust → lift to `SAFE_HEIGHT` (30 cm above the table) →
 transit (go_to_ee_pose, `HOLD_LEVEL`) to above the spot → the impedance lowering from there →

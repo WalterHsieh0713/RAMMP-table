@@ -165,6 +165,49 @@ def test_terminal_prompt():
         del V.input
 
 
+def test_a_click_lands_on_the_table_point_under_it():
+    scene = three_box_scene()
+    res = scene.detect()
+    target = scene.origin + 0.10 * scene.ex + 0.20 * scene.ey        # a point on the tabletop
+    (u, v), = project_to_pixels(target, **scene.intrinsics)[0]
+    p = V.click_to_table(u, v, scene.intrinsics, res["model"])
+    assert p is not None and np.linalg.norm(p - target) < 0.005, (p, target)
+    behind = [0.0, 0.0, 1.0, 1.0]                                     # the plane z = -1: behind the camera
+    assert V.click_to_table(u, v, scene.intrinsics, behind) is None
+
+
+def test_the_grid_is_kept_when_no_spot_fits():
+    """A spot chosen by hand needs the free-space map even when the detector found no room."""
+    scene = Scene(boxes=[(a, b, 0.09, 0.09, 0.08) for a in (-0.15, 0.0, 0.15) for b in (-0.05, 0.12, 0.29)])
+    res = scene.detect()
+    assert res["placement"] is None, "expected a table with no room"
+    grid = res.get("grid")
+    assert grid is not None
+    on_box = scene.origin + 0.0 * scene.ex + 0.12 * scene.ey
+    assert V.grid_clearance(on_box, grid) == 0.0
+
+
+def test_terminal_prompt_takes_a_spot():
+    answers = iter(["at 0.8", "at x y", "at 0.80, 0.10"])
+    V.input = lambda _prompt: next(answers)
+    try:
+        assert V.ask(None, window=False, allow_pick=True) == ("at", (0.80, 0.10))
+        answers = iter(["at 0.8 0.1", "q"])                   # without allow_pick it's just ignored
+        assert V.ask(None, window=False) == "cancel"
+    finally:
+        del V.input
+
+
+def test_a_refused_pick_is_drawn_as_a_red_x():
+    scene = three_box_scene()
+    res = scene.detect()
+    pl = res["placement"]
+    base = np.full(scene.shape + (3,), 128, np.uint8)
+    img = V.confirm_image(base, scene.intrinsics, pl["axes"], np.zeros((0, 3)), [], None, BOWL_RADIUS, [],
+                          can_confirm=False, rejected=pl["point"])
+    assert (img[: scene.shape[0]] == V.RED).all(axis=2).sum() > 20
+
+
 def show():
     scene = roomy_scene()
     results = noisy_scans(scene, bad=(4,))

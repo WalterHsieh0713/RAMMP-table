@@ -49,6 +49,10 @@ look
   height and the obstacle points to ~/.table_place/ (level frame), with confirmed: true; `place`
   refuses a spot without it (--no-confirm overrides). No display (plain ssh): --no-window, or it
   asks in the terminal and the picture is in ~/.table_place/overlay.png. Nothing moves.
+  Choosing the spot yourself: click the table in the window (or type "at X Y" at the terminal
+  prompt, level frame, m). The point is checked like the camera's: the bowl must fit there in
+  most of the frames (MIN_INLIER_FRAC) and be in reach; then Confirm saves it (source
+  "look-chosen"). This also works when the camera found no spot itself.
 
 place  (starts with the bowl already gripped by its lip)
   1. adjust   : turn the hand in place to EXACTLY level + rolled 90 deg (camera on the right of
@@ -108,7 +112,7 @@ from scipy.spatial.transform import Rotation, Slerp
 
 from arm_backend import BACKEND, connect_arm  # (which arm stack: TABLE_ARM_BACKEND)
 from kinova_arm import HOLD_FIXED, HOLD_LEVEL, HOLD_PRESS, PROFILE_MEDIUM
-from spot_vote import ask, combine_spots, confirm_image, grid_clearance
+from spot_vote import MIN_INLIER_FRAC, ask, click_to_table, combine_spots, confirm_image, grid_clearance
 from table_detect import (BOWL_RADIUS, EDGE_MARGIN, MARGIN, MAX_PLANE_DIST, MIN_TABLE_HEIGHT,
                           backproject, depth_to_color, detect_table, overlay_image, plane_axes,
                           write_image)
@@ -993,6 +997,7 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
         ok, reason = vote["ok"], vote["reason"]
         spot_base = spot_cam = None
         clear = 0.0
+        need = LOOK_RADIUS + min(MARGIN, LOOK_EDGE_MARGIN)
         if ok:
             spot_base = vote["spot"]
             spot_cam = R.T @ (spot_base - t)
@@ -1000,7 +1005,6 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
             ref = min((c for c, keep in zip(cands, vote["inliers"]) if keep),
                       key=lambda c: np.linalg.norm(c["base"][:2] - spot_base[:2]))
             clear = grid_clearance(spot_cam, ref["result"]["placement"])
-            need = LOOK_RADIUS + min(MARGIN, LOOK_EDGE_MARGIN)
             r = float(np.hypot(*spot_base[:2]))
             if clear < need:
                 ok, reason = False, (f"the averaged spot is only {clear * 100:.1f} cm clear (need "
@@ -1017,21 +1021,65 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
         base_img = overlay_image(_base_image(depth_m, color), res["mask"], obstacle_mask=res["obstacle_mask"])
         axes = res["placement"]["axes"] if res["placement"] is not None else plane_axes(res["normal"])
         n_in = int(vote["inliers"].sum())
-        if ok:
-            lines = [f"spot x={spot_base[0]:.3f} y={spot_base[1]:.3f} m, {np.hypot(*spot_base[:2]):.2f} m from base",
-                     f"{n_in} of {len(cands)} spots agree ({frames} frames), spread {vote['spread'] * 100:.1f} cm",
-                     f"table z={table_z:.3f} m, tilt {tilt:.1f} deg, {clear * 100:.1f} cm clear"]
-        else:
-            lines = textwrap.wrap(f"NOT USABLE: {reason}", 70) + [
-                f"{len(cands)} of {frames} frames found a spot; R = rescan, Esc = cancel"]
-        img = confirm_image(base_img, intr, axes, [c["cam"] for c in cands], vote["inliers"],
-                            spot_cam, LOOK_RADIUS, lines, can_confirm=ok)
-        write_image(str(SPOT_DIR / "overlay.png"), img)
-        print("\n".join(lines))
-        print(f"picture: {SPOT_DIR / 'overlay.png'} (grey = each frame's spot, red X = outlier, "
-              "green = the spot)")
+        grids = [f["result"]["grid"] for f in tables if f["result"].get("grid") is not None]
 
-        choice = ask(img, can_confirm=ok, window=window)
+        def check_pick(p_cam):
+            """A spot chosen by hand (camera frame) -> (spot_base, p_cam, clearance) or the reason
+            it can't be used: the bowl must fit there in most frames, and be in reach."""
+            if p_cam is None:
+                return None, "that isn't on the table plane"
+            if not grids:
+                return None, "no free-space map of the table in these frames"
+            clears = [grid_clearance(p_cam, g) for g in grids]
+            n_fit = sum(c >= need for c in clears)
+            base_pt = R @ p_cam + t
+            r = float(np.hypot(*base_pt[:2]))
+            if n_fit < MIN_INLIER_FRAC * len(grids):
+                return None, (f"the bowl doesn't fit there: {need * 100:.1f} cm clear in only {n_fit} of "
+                              f"{len(grids)} frames (median {np.median(clears) * 100:.1f} cm)")
+            if not rmin <= r <= rmax:
+                return None, f"that's {r:.2f} m from the arm base -- out of reach ({rmin:.2f}-{rmax:.2f})"
+            return (base_pt, p_cam, float(np.median(clears))), None
+
+        picked, rejected, note = None, None, None    # a spot chosen by hand (click / "at X Y")
+        while True:
+            if picked is not None:
+                spot_base, spot_cam, clear = picked
+                ok = True
+                lines = [f"CHOSEN: x={spot_base[0]:.3f} y={spot_base[1]:.3f} m, "
+                         f"{np.hypot(*spot_base[:2]):.2f} m from base",
+                         f"clear {clear * 100:.1f} cm (median over {len(grids)} frames)",
+                         f"table z={table_z:.3f} m, tilt {tilt:.1f} deg"]
+            elif ok:
+                lines = [f"spot x={spot_base[0]:.3f} y={spot_base[1]:.3f} m, {np.hypot(*spot_base[:2]):.2f} m from base",
+                         f"{n_in} of {len(cands)} spots agree ({frames} frames), spread {vote['spread'] * 100:.1f} cm",
+                         f"table z={table_z:.3f} m, tilt {tilt:.1f} deg, {clear * 100:.1f} cm clear"]
+            else:
+                lines = textwrap.wrap(f"NOT USABLE: {reason}", 70) + [
+                    f"{len(cands)} of {frames} frames found a spot; R = rescan, Esc = cancel"]
+            lines = lines + (textwrap.wrap(f"NOT THERE: {note}", 70) if note else []) + [
+                "click the table to choose the spot yourself"]
+            img = confirm_image(base_img, intr, axes, [c["cam"] for c in cands], vote["inliers"],
+                                spot_cam if ok else None, LOOK_RADIUS, lines, can_confirm=ok, rejected=rejected)
+            write_image(str(SPOT_DIR / "overlay.png"), img)
+            print("\n".join(lines))
+            print(f"picture: {SPOT_DIR / 'overlay.png'} (grey = each frame's spot, red X = outlier or refused, "
+                  "green = the spot)")
+
+            choice = ask(img, can_confirm=ok, window=window, allow_pick=True)
+            if isinstance(choice, tuple):
+                kind, value = choice
+                if kind == "pick":
+                    p_cam = click_to_table(value[0], value[1], intr, res["model"])
+                else:   # "at": level-frame x, y on the table
+                    p_cam = R.T @ (np.array([value[0], value[1], table_z]) - t)
+                good, why = check_pick(p_cam)
+                if good is not None:
+                    picked, rejected, note = good, None, None
+                else:
+                    rejected, note = p_cam, why
+                continue
+            break
         if choice == "rescan":
             continue
         if choice == "cancel":
@@ -1041,14 +1089,16 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
         save_obstacles(depth_m, intr, res, R, t, model, q)
         record = dict(time=time.time(), time_str=time.strftime("%Y-%m-%d %H:%M:%S"),
                       x=float(spot_base[0]), y=float(spot_base[1]), table_z=table_z, frame="level",
-                      spread_cm=round(vote["spread"] * 100, 2), n_used=n_in, n_found=len(cands),
                       n_frames=frames, confirmed=True, clearance=clear,
                       spot=[float(v) for v in spot_base], up_base=model.up_base.tolist(),
                       joints=q.tolist(), table_tilt_deg=tilt, bowl_radius=LOOK_RADIUS,
                       candidates=[[round(float(v), 4) for v in c["base"]] for c in cands],
-                      inliers=[bool(v) for v in vote["inliers"]])
+                      inliers=[bool(v) for v in vote["inliers"]],
+                      source="look-chosen" if picked is not None else "look")
+        if picked is None:
+            record.update(spread_cm=round(vote["spread"] * 100, 2), n_used=n_in, n_found=len(cands))
         SPOT_FILE.write_text(json.dumps(record, indent=2))
-        print(f"confirmed, saved {SPOT_FILE}")
+        print(f"confirmed, saved {SPOT_FILE}" + (" (spot chosen by hand)" if picked is not None else ""))
         return record
 
 
