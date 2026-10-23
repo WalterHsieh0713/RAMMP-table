@@ -1,7 +1,7 @@
 """Which arm stack the scripts talk to, picked by TABLE_ARM_BACKEND (default "feeding").
 
 place_bowl.py and scan_pose.py only use connect_arm() / describe() from here, so running on a
-different stack (e.g. the Jetson brought up by Sheppy) means adding one backend below; the
+different stack (e.g. the Jetson on the HERL chair, started with the `sheppy` launcher) means adding one backend below; the
 planning and touch-sensing code stays as it is.
 
 What a backend's connect_arm() must return -- an object with:
@@ -25,7 +25,7 @@ connection while the first one blocks in set_joint_trajectory.
 Backends:
   feeding  ~/feeding-deployment's arm_server.py over TCP (rchi-cpu-5; ARM_RPC_HOST, default
            127.0.0.1). Needs bulldog_bypass.py + the stub base server running there.
-  kinova   RAMMP's kinova-gen3-ros2 driver over ROS 2 (the Jetson / Sheppy); see kinova_arm.py.
+  kinova   RAMMP's kinova-gen3-ros2 driver over ROS 2 (the HERL chair's Jetson); see kinova_arm.py.
            Source the interfaces first: source ~/ros_ws_velocity_fix/install/setup.zsh
 """
 import os

@@ -1,4 +1,4 @@
-"""TABLE_ARM_BACKEND=kinova: the arm through RAMMP's kinova-gen3-ros2 driver (the Jetson / Sheppy).
+"""TABLE_ARM_BACKEND=kinova: the arm through RAMMP's kinova-gen3-ros2 driver (the HERL chair's Jetson).
 
 Interface: https://rammp-org.github.io/kinova-gen3-ros2/interface
 Needs the interface packages on the Python path -- source the workspace first (zsh):
@@ -20,7 +20,7 @@ How the calls arm_backend.py lists map onto the driver:
   open_gripper     a short /setpoint/gripper stream session (open_stream ... close_stream)
 
 Two interface versions (rammp-interfaces-ros2):
-  installed on Sheppy (built 2026-09-22, ~/ros_ws_velocity_fix): go_to_ee_pose takes only the
+  installed on the HERL chair (built 2026-09-22, ~/ros_ws_velocity_fix): go_to_ee_pose takes only the
       pose -- no speed_scale / orientation_hold / impedance, it runs at cuRobo's planned speed.
   dev branch = the nightly driver images (ghcr.io/rammp-org/kinova-gen3-ros2:nightly):
       go_to_ee_pose (and go_to_joint_config) add speed_scale, orientation_hold (HOLD_LEVEL /
@@ -34,7 +34,7 @@ Two naming schemes (KinovaArm picks one from /joint_states):
       the arm_ prefix, the model is rendered from mount.yaml and published on
       /arm/robot_description, and Cartesian poses (/ee_state, go_to_ee_pose) are in arm_mount
       (gravity-aligned; go_to_ee_pose refuses base_link).
-Assumes arbitration_mode:=disabled (checked on Sheppy 2026-10-08), so the token is all zeros.
+Assumes arbitration_mode:=disabled (checked on the HERL chair 2026-10-08), so the token is all zeros.
 """
 import atexit
 import csv
@@ -71,7 +71,7 @@ LOOSE_TOL_RAD = 0.5      # rad, path/goal tolerance for the watched impedance lo
 # lower_line_until_contact force test: contact = the hand's z force changes a lot. The force is the
 # driver's own end-effector wrench (/ee_state wrench.force.z, the nightly driver since 2026-10-13)
 # when the sourced interfaces have it, else force_z (place_bowl's estimate from the joint torques).
-# It is meant to be the EXTERNAL force, but on Sheppy (2026-10-19, empty gripper, still) it reads
+# It is meant to be the EXTERNAL force, but on the HERL chair (2026-10-19, empty gripper, still) it reads
 # ~(-3, +12, +3) N, noise ~0.2 N: a big constant offset, and its frame isn't confirmed (the hand's,
 # where the vertical is the hand's x when the bowl is level, or arm_mount). So the wrench test
 # watches the SIZE of the change of the whole force vector: the same in any frame, any sign, and

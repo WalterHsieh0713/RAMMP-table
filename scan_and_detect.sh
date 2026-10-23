@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the table detector and the overlay viewer (rqt_image_view) -- one terminal.
 # TABLE_CAMERA picks the camera (default "scene"):
-#   scene - Sheppy's scene camera, fixed to the chair: the arm doesn't move.
+#   scene - the HERL chair's scene camera, fixed to the chair: the arm doesn't move.
 #   wrist - first moves the arm to the scan pose; the detector only starts if
 #           scan_pose.py confirms the arm arrived (an abort, refusal or missed pose stops here).
 #

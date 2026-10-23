@@ -18,7 +18,7 @@ A target given by hand instead of `look` (no camera; you keep the target clear):
 
 From Python:  spot = choose_spot();  if spot: place_at(spot, execute=True)
 
-On Sheppy (the Jetson, RAMMP's kinova-gen3-ros2 driver; nightly of 2026-10-19):
+On the HERL chair (the Jetson, RAMMP's kinova-gen3-ros2 driver; nightly of 2026-10-19):
     source ~/table_ws/install/setup.zsh       # interfaces matching the driver (dev = nightly)
     export TABLE_ARM_BACKEND=kinova            # TABLE_CAMERA defaults to "scene"
     python3 place_bowl.py look  ...  place --execute
@@ -118,7 +118,7 @@ HERE = Path(__file__).resolve().parent
 # TABLE_URDF / TABLE_CALIB / TABLE_STATE_DIR / TABLE_CAMERA_NS instead of editing them here.
 # The repo URDF: next to this folder when it lives inside feeding-deployment, else the lab checkout.
 _URDF = Path("src") / "feeding_deployment" / "assets" / "robot" / "robot.urdf"
-# On Sheppy (TABLE_ARM_BACKEND=kinova): the driver's own URDF, saved from /robot_description as
+# On the HERL chair (TABLE_ARM_BACKEND=kinova): the driver's own URDF, saved from /robot_description as
 # sheppy.urdf next to this file -- /ee_state is computed from it, so ours must match.
 _URDF_CANDIDATES = ([HERE / "sheppy.urdf"] if BACKEND == "kinova" else []) + [
     HERE.parent / _URDF, Path.home() / "feeding-deployment" / _URDF]
@@ -136,9 +136,9 @@ MOUNT_FILE = SPOT_DIR / "mount.json"   # true "up" in the arm base frame (`place
 # --- the bowl and how it is held (see the diagram above) ---
 LIP_WIDTH = 0.03175     # m, 1.25 in: the flat lip around the bowl, past BOWL_RADIUS
 BOWL_DEPTH = 0.08       # m, lip (= tool frame height) to the bowl's bottom
-# Sheppy (kinova backend): the tool frame is the flange (end_effector_link), and the URDF has no
+# The HERL chair (kinova backend): the tool frame is the flange (end_effector_link), and the URDF has no
 # finger_tip link (its Robotiq tip links are the pad bases, ~11 cm out), so the fingertip distance
-# is set here. Default = the old rig's 17.955 cm, same Gen3 + Robotiq 2F-85: MEASURE it on Sheppy
+# is set here. Default = the old rig's 17.955 cm, same Gen3 + Robotiq 2F-85: MEASURE it on the HERL chair
 # (flange face to the closed fingertips) and export TABLE_FLANGE_TO_TIP if it differs.
 FLANGE_TO_TIP = float(os.environ.get("TABLE_FLANGE_TO_TIP", 0.17955))   # m
 TIP_AHEAD_OF_TOOL = (FLANGE_TO_TIP if BACKEND == "kinova"
@@ -448,7 +448,7 @@ class ArmModel:
         # true up (same origin). The arm itself takes base-frame commands; joint commands don't
         # care, and the few Cartesian ones convert with R_wb.
         self.R_wb, self.up_base = load_mount()
-        # Sheppy's URDF has neither tool_frame nor finger_tip: add them on the flange's z
+        # The HERL chair's URDF has neither tool_frame nor finger_tip: add them on the flange's z
         # axis (the driver's tool frame IS end_effector_link -- /ee_state matched it, 2026-10-08).
         self.virtual = {}
         if "tool_frame" not in links:
@@ -922,7 +922,7 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
     Cancelled: None, nothing saved. Nothing moves. The arm must be still, gripper empty."""
     from table_detector_node import CAMERA, CAMERA_NAME
     scene = CAMERA_NAME == "scene"
-    if scene:   # Sheppy's scene camera: fixed to the chair, pose from TF
+    if scene:   # the HERL chair's scene camera: fixed to the chair, pose from TF
         depth_topic = depth_topic or CAMERA["depth_topic"]
         info_topic = info_topic or CAMERA["info_topic"]
         color_topic = CAMERA["color_topic"] if color_topic is None else color_topic

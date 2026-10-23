@@ -1,7 +1,7 @@
 # What to do next (updated 2026-10-19)
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
-**`PROGRESS_2026-10-19.md`** (impedance placing on Sheppy works, `--here`). Design:
+**`PROGRESS_2026-10-19.md`** (impedance placing on the HERL chair works, `--here`). Design:
 `PLAN_2026-10-06_scene_camera.md`.
 
 ## Next session: put the bowl down at a chosen spot
@@ -9,8 +9,8 @@ Today `place --here` lowers straight down from wherever the hand is. Next: **say
 should go** (x, y on the table), and the arm carries it there and puts it down the way `--here`
 does now (impedance, stop on vz, hold, open, straight retreat).
 
-Most of it exists from the old rig; it hasn't been run on Sheppy or with today's driver:
-- `place --at X Y [--table-z Z]`: bowl centre at (X, Y) m, level frame (= `arm_mount` on Sheppy:
+Most of it exists from the old rig; it hasn't been run on the HERL chair or with today's driver:
+- `place --at X Y [--table-z Z]`: bowl centre at (X, Y) m, level frame (= `arm_mount` on the HERL chair:
   origin on the arm base axis, x forward, y left).
 - `mark`: touch the target with the fingertip; it saves that point (and the table height) as the
   spot. Then `place` with no arguments goes there.
@@ -60,14 +60,14 @@ open, retreat.
 - Tell the driver team:
   - the `/ee_state` "external" force drifts ~10 N with the pose (empty gripper, still);
   - `arm_robotiq_85_left_inner_knuckle_joint` in `/arm/robot_description` doesn't load in pybullet;
-  - Sheppy's `mount.yaml` is level (identity): is that right?
+  - the HERL chair's `mount.yaml` is level (identity): is that right?
 - `look` picks the spot nearest the middle of the camera view (a wrist-camera habit). Change it to
   the spot **nearest the gripper**, and drop the "arm must be still" requirement for the scene camera.
 - Filter the whole arm and a held bowl out of the scene camera's points (today only the gripper is).
 - The live detector doesn't know the reach ring or the lip. Give it the same limits as `look`.
 
 ## Setup on the Jetson
-- **Stack:** `sheppy` in `~/rammp-deployments/december_2026/`. Start `arm_state_publisher`, `arm`
+- **Stack:** `sheppy` (the lab's launcher for the ROS nodes) in `~/rammp-deployments/december_2026/`. Start `arm_state_publisher`, `arm`
   and `planner`, all nightly, the state publisher first. Not `home_arm` or the demos.
 - **Each terminal:**
   ```bash

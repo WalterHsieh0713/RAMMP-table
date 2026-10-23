@@ -17,11 +17,11 @@ Nothing outside this folder is changed.
 | `spot_vote.py` | `look`'s several-scan vote: drop outlying spots, average the rest, check the average is clear, and the Confirm / Rescan / Cancel window (terminal prompt without a display). |
 | `test_spot_vote.py` | Offline tests for it, no pybullet needed; `--show` opens the window on a synthetic scan. |
 | `arm_backend.py` | The one place that knows which arm stack is used (`TABLE_ARM_BACKEND`, default `feeding`) and what an arm object must provide. |
-| `kinova_arm.py` | `TABLE_ARM_BACKEND=kinova`: Sheppy's `kinova-gen3-ros2` driver over ROS 2 (state, trajectories, `go_to_ee_pose`, gripper, the impedance lowering). |
+| `kinova_arm.py` | `TABLE_ARM_BACKEND=kinova`: the HERL chair's `kinova-gen3-ros2` driver over ROS 2 (state, trajectories, `go_to_ee_pose`, gripper, the impedance lowering). |
 | `save_urdf.py` | Saves the driver's model (`/arm/robot_description`) as `sheppy.urdf`; run after a driver update. |
 | `plot_descent.py` | Plots the latest recorded lowering (`~/.table_place/descents/`): height, the 6 velocities, force z, by phase. |
 
-## Running on another machine (e.g. the Jetson under Sheppy)
+## Running on another machine (e.g. the Jetson on the HERL chair)
 Nothing to edit; export what differs:
 
 | Variable | Default (rchi-cpu-5) |
@@ -31,11 +31,11 @@ Nothing to edit; export what differs:
 | `TABLE_URDF` | `feeding-deployment/src/feeding_deployment/assets/robot/robot.urdf` |
 | `TABLE_CALIB` | `~/.ros2/easy_handeye2/calibrations/wrist_camera_calib.calib` |
 | `TABLE_STATE_DIR` | `~/.table_place` (spot, mount tilt, overlay) |
-| `TABLE_CAMERA` | `scene` (Sheppy's scene camera, pose from TF); `wrist` for the old rig |
-| `TABLE_REACH` | `0.75,0.95` m from the arm base; Sheppy: `0.70,1.05` (`test_place_bowl.py --sweep`) |
-| `TABLE_FLANGE_TO_TIP` | `0.17955` m, kinova backend only (not yet measured on Sheppy) |
+| `TABLE_CAMERA` | `scene` (the HERL chair's scene camera, pose from TF); `wrist` for the old rig |
+| `TABLE_REACH` | `0.75,0.95` m from the arm base; HERL chair: `0.70,1.05` (`test_place_bowl.py --sweep`) |
+| `TABLE_FLANGE_TO_TIP` | `0.17955` m, kinova backend only (not yet measured on the HERL chair) |
 
-On Sheppy: `TABLE_ARM_BACKEND=kinova`, interfaces from `~/table_ws`, and `sheppy.urdf` next to the
+On the HERL chair: `TABLE_ARM_BACKEND=kinova`, interfaces from `~/table_ws`, and `sheppy.urdf` next to the
 code (`save_urdf.py`). Steps and what was learned there: `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md`, `NEXT_STEPS.md`. Tuning by environment there: `TABLE_CONTACT`,
 `TABLE_VZ_STOP`, `TABLE_HOLD_PRESS`, `TABLE_FORCE_RISE_Z` (see `kinova_arm.py`).

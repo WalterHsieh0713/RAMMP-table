@@ -1,10 +1,10 @@
 """
-ROS 2 node: live table detection from the scene camera (Sheppy) or the wrist RealSense.
+ROS 2 node: live table detection from the scene camera (the HERL chair) or the wrist RealSense.
 
 Which camera is picked by TABLE_CAMERA (default "scene"); see CAMERAS below for
 the topics and floor-rejection values each one uses.
 
-Scene camera on Sheppy (behind the joystick, fixed to the chair; its TF to
+Scene camera on the HERL chair (behind the joystick, fixed to the chair; its TF to
 base_link is published, so no arm move is needed):
     python3 table_detector_node.py
 Its depth isn't aligned to color, so the overlay is drawn on a grayscale depth picture.
@@ -48,7 +48,7 @@ from table_detect import (MAX_PLANE_DIST, MIN_TABLE_HEIGHT, depth_to_color, dete
 
 # Default topics and floor rejection per camera; TABLE_CAMERA picks one.
 CAMERAS = {
-    # Sheppy, measured at HERL 2026-10-08: the camera is 0.35 m above base_link, the
+    # HERL chair, measured at HERL 2026-10-08: the camera is 0.35 m above base_link, the
     # table ~0.37 m below the camera at z~-0.02 in base_link. Depth is not aligned to color.
     "scene": dict(depth_topic="/scene_camera/depth/image_raw",
                   info_topic="/scene_camera/depth/camera_info",
