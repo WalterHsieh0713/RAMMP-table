@@ -48,12 +48,14 @@ from table_detect import (MAX_PLANE_DIST, MIN_TABLE_HEIGHT, depth_to_color, dete
 
 # Default topics and floor rejection per camera; TABLE_CAMERA picks one.
 CAMERAS = {
-    # HERL chair, measured at HERL 2026-10-08: the camera is 0.35 m above base_link, the
-    # table ~0.37 m below the camera at z~-0.02 in base_link. Depth is not aligned to color.
-    "scene": dict(depth_topic="/scene_camera/depth/image_raw",
+    # flatbot (snorlax, 2026-10-26): the OAK's depth is image_rect_raw, and the camera sits ~14 cm
+    # above the table looking almost level, so the table reaches ~1 m away. (The HERL chair,
+    # 2026-10-08: depth/image_raw, camera 0.35 m above base_link, table ~0.37 m below it,
+    # max_plane_dist 0.6 -- pass --depth-topic / --max-plane-dist there.) Depth is not aligned to color.
+    "scene": dict(depth_topic="/scene_camera/depth/image_rect_raw",
                   info_topic="/scene_camera/depth/camera_info",
                   color_topic="/scene_camera/color/image_raw",
-                  max_plane_dist=0.6, min_table_height=-0.2),
+                  max_plane_dist=1.0, min_table_height=-0.2),
     # Old rig's wrist RealSense at the scan pose (see table_detect.py).
     "wrist": dict(depth_topic="/camera/wrist/aligned_depth_to_color/image_raw",
                   info_topic="/camera/wrist/aligned_depth_to_color/camera_info",

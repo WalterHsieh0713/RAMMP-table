@@ -23,7 +23,7 @@ spot, then `place` there.
        `arm_mount` shows where it looks). The Oct 26 X (0.764, −0.248) was outside the image.
 3. [ ] **Check the camera transform in x/y:**
    - `mark` the X, then run
-     `look --no-window --max-plane-dist 1.0 --depth-topic /scene_camera/depth/image_rect_raw`;
+     `look --no-window` (flatbot's depth topic and range are the defaults now);
    - type `at X Y` (the marked point), then copy `~/.table_place/overlay.png` and check the red X / circle sits
      on the tape;
    - with a cup on the X, it should also show as an object there. Within ~1 cm = good.
@@ -34,8 +34,6 @@ spot, then `place` there.
    - then Confirm, and `place --execute`.
 5. [ ] **Make the code match flatbot:**
    - `TABLE_VZ_STOP=-0.01` as the default;
-   - the scene camera's depth topic `image_rect_raw` and `max_plane_dist` 1.0 as the defaults (or per
-     robot);
    - `test_place_bowl.py` for the kinova backend.
 
 ## Also open
