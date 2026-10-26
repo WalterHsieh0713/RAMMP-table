@@ -159,6 +159,7 @@ MIN_TOOL_HEIGHT = 0.02  # m, the tool frame is never targeted lower than this ab
 MAX_DROP = 0.40         # m, --here: keep going down until the table is felt -- at most this far
                         # (or as far as the arm can reach straight down, whichever is less)
 RETREAT = 2.5 * LIP_WIDTH   # m, straight back after letting go, clear of the lip, then stop
+RETREAT_MIN = 1.5 * LIP_WIDTH   # m, a shorter line is still taken if it gets this far (fingers past the lip)
 RETREAT_SPEED = 0.03        # m/s, the impedance retreat along its planned line ...
 RETREAT_STEP = 0.004        # m, ... joint waypoints this far apart
 RETREAT_RELEASE = 0.25      # the first quarter of the retreat also lifts the setpoint by HOLD_PRESS
@@ -1673,7 +1674,9 @@ def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP):
     """Joint waypoints every `step` along the straight horizontal line RETREAT back from
     q_start's tool pose (back = opposite the hand's heading, level frame), orientation kept.
     release: also lift that much over the first RETREAT_RELEASE of it (letting go of the press
-    gently instead of at once). Returns the joint arrays; the first is q_start."""
+    gently instead of at once). Returns the joint arrays; the first is q_start. If the line runs
+    out of reach (IK / a joint jump) after RETREAT_MIN, it ends there (flatbot at 0.8 m, 2026-10-26:
+    6-7 cm of the 8)."""
     T = model.fk(q_start)
     quat = Rotation.from_matrix(T[:3, :3]).as_quat()
     back = -np.array([T[0, 2], T[1, 2], 0.0])
@@ -1687,6 +1690,10 @@ def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP):
         pos = T[:3, 3] + f * RETREAT * back + min(1.0, f / RETREAT_RELEASE) * release * UP
         q = model.ik(pos, quat, seed, restarts=0, stay=0.01)
         if q is None or np.max(np.abs(wrap_deg(q - seed))) > 3.0 * step / PATH_STEP:
+            done = (k - 1) / n * RETREAT
+            if done >= RETREAT_MIN:
+                print(f"  retreat: only {done * 100:.1f} cm straight back fits from here (of {RETREAT * 100:.0f})")
+                break
             raise Refused(f"retreat: can't go straight back from here ({f * RETREAT * 100:.0f} cm in)")
         qs.append(q)
         seed = q
@@ -1706,7 +1713,7 @@ def back_out(arm, model, compliant_goto, impedance=False):
             line = plan_retreat(model, q0, release=HOLD_PRESS if hold_q is not None else 0.0)
         except Refused as e:
             sys.exit(f"STOPPED (gripper open, hand not backed out): {e}")
-        print(f"-> retreat ({RETREAT * 100:.0f} cm straight back along a planned line, impedance, "
+        print(f"-> retreat ({(len(line) - 1) * RETREAT_STEP * 100:.0f} cm straight back along a planned line, impedance, "
               f"{RETREAT_SPEED * 100:.0f} cm/s)")
         code = arm.follow_line([[float(v) for v in q] for q in line], step_s=RETREAT_STEP / RETREAT_SPEED,
                                profile=LOWER_PROFILE)

@@ -35,7 +35,8 @@ def test_camera_is_on_the_tool_plus_y_side():
 
 
 def test_bowl_geometry_from_the_measurements():
-    assert np.isclose(P.HOLD_REACH, 0.055 + 0.05955)            # bowl radius + tool->fingertip
+    tip = P.FLANGE_TO_TIP if P.BACKEND == "kinova" else 0.05955  # kinova: the tool frame is the flange
+    assert np.isclose(P.HOLD_REACH, 0.055 + tip)                 # bowl radius + tool->fingertip
     assert np.isclose(P.RETREAT, 2.5 * 1.25 * 0.0254)            # 2.5 x the lip
     assert P.RETREAT > P.LIP_WIDTH                               # fingertips clear the lip
     tip = MODEL.fk(np.zeros(7), "finger_tip")[:3, 3]

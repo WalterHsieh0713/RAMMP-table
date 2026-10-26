@@ -1,14 +1,52 @@
-# What to do next (updated 2026-10-23)
+# What to do next (updated 2026-10-26)
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
-**`PROGRESS_2026-10-23.md`** (choose the spot by clicking; **the full list of what to test**). Design:
+`PROGRESS_2026-10-23.md` (choose the spot by clicking), **`PROGRESS_2026-10-26.md`** (flatbot / snorlax:
+placing at a marked spot works; setup, contact threshold, scene camera depth). Design:
 `PLAN_2026-10-06_scene_camera.md`.
 
-## Next session: put the bowl down at a chosen spot
-Today `place --here` lowers straight down from wherever the hand is. Next: **say where the bowl
-should go** (x, y on the table), and the arm carries it there and puts it down the way `--here`
-does now (impedance, stop on vz, hold, open, straight retreat).
+Today's robot is **flatbot** (arm on a 30° mount), run from **snorlax**. Setup:
+`PROGRESS_2026-10-26.md`, section 1. The HERL chair setup further down is the Oct 19–23 one.
+
+## Next session: the scene camera chooses the spot
+`mark` → `place --execute` puts the bowl on a sticky note on flatbot. Next: let `look` choose the
+spot, then `place` there.
+
+1. [ ] **Depth on the plain table** (it's streaky; see the Oct 26 notes, section 5):
+   - lay a printed page flat on the table and watch `/scene_camera/depth/image_rect_raw` in Foxglove;
+   - if the page is solid and the table isn't, it's texture: put a patterned mat under the placing
+     area, or try a stronger dot projector;
+   - if the page is streaky too: the camera is only ~14 cm above the table; ask the lab about mounting
+     it higher or tilting it down (~30° or more onto the table).
+2. [ ] **Is the X in view?** Put the tape X where the camera sees open table (the 3D panel in
+       `arm_mount` shows where it looks). The Oct 26 X (0.764, −0.248) was outside the image.
+3. [ ] **Check the camera transform in x/y:**
+   - `mark` the X, then run
+     `look --no-window --max-plane-dist 1.0 --depth-topic /scene_camera/depth/image_rect_raw`;
+   - type `at X Y` (the marked point), then copy `~/.table_place/overlay.png` and check the red X / circle sits
+     on the tape;
+   - with a cup on the X, it should also show as an object there. Within ~1 cm = good.
+   - Height already agrees (0.19 vs 0.198 m).
+4. [ ] **`look` picks the spot:**
+   - its required 13.5 cm from every visible table edge didn't fit the narrow strip it sees; this may
+     need the camera fix, or a smaller margin for the scene camera;
+   - then Confirm, and `place --execute`.
+5. [ ] **Make the code match flatbot:**
+   - `TABLE_VZ_STOP=-0.01` as the default;
+   - the scene camera's depth topic `image_rect_raw` and `max_plane_dist` 1.0 as the defaults (or per
+     robot);
+   - `test_place_bowl.py` for the kinova backend.
+
+## Also open
+- The bump at the end of the retreat (z +1 cm, ~27 N) when the arm leaves impedance
+  (`descent_20261026_125221`).
+- Flange to fingertips: still the 17.955 cm default; never measured with a ruler.
+- `depth_registration` on the scene camera: the overlay is drawn on colour but the depth may not line up
+  with it.
+
+## Earlier plan (HERL chair, Oct 23): put the bowl down at a chosen spot
+Done on flatbot on Oct 26 (`mark` → `place`). The checklist below is kept for the HERL chair.
 
 Most of it exists from the old rig; it hasn't been run on the HERL chair or with today's driver:
 - `place --at X Y [--table-z Z]`: bowl centre at (X, Y) m, level frame (= `arm_mount` on the HERL chair:
