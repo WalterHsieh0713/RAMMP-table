@@ -19,20 +19,24 @@ spot, then `place` there.
      area, or try a stronger dot projector;
    - if the page is streaky too: the camera is only ~14 cm above the table; ask the lab about mounting
      it higher or tilting it down (~30° or more onto the table).
-2. [ ] **Is the X in view?** Put the tape X where the camera sees open table (the 3D panel in
+2. [ ] **First, rerun `py place_bowl.py look --no-window`.** At the end of Oct 26 it saw the table
+       34° from level in every frame ("wrong plane?"), where earlier the same day it read ~0°. The
+       camera's TF didn't change. Was the camera moved/tilted? Then its mount angle in the lab's
+       `static_tf` config is out of date. Otherwise check `overlay.png` for which plane it picked.
+3. [ ] **Is the X in view?** Put the tape X where the camera sees open table (the 3D panel in
        `arm_mount` shows where it looks). The Oct 26 X (0.764, −0.248) was outside the image.
-3. [ ] **Check the camera transform in x/y:**
+4. [ ] **Check the camera transform in x/y:**
    - `mark` the X, then run
      `look --no-window` (flatbot's depth topic and range are the defaults now);
    - type `at X Y` (the marked point), then copy `~/.table_place/overlay.png` and check the red X / circle sits
      on the tape;
    - with a cup on the X, it should also show as an object there. Within ~1 cm = good.
    - Height already agrees (0.19 vs 0.198 m).
-4. [ ] **`look` picks the spot:**
+5. [ ] **`look` picks the spot:**
    - its required 13.5 cm from every visible table edge didn't fit the narrow strip it sees; this may
      need the camera fix, or a smaller margin for the scene camera;
    - then Confirm, and `place --execute`.
-5. [ ] **Make the code match flatbot:**
+6. [ ] **Make the code match flatbot:**
    - `TABLE_VZ_STOP=-0.01` as the default;
    - `test_place_bowl.py` for the kinova backend.
 
