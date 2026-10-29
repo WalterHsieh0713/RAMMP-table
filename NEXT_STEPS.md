@@ -3,16 +3,32 @@
 **The placing is moving to the lab's repo:** `capabilities/place_container` in
 rammp-org/rammp-kitchen-capability-engines, draft PR #22 (issue #7), branch
 `feature/7-place-container` on `WalterHsieh0713/rammp-kitchen-capability-engines`. It ports
-`mark` / `place` / `retreat` / `reset` onto the shared `self.arm`, but it has **not run on the arm yet**.
-First thing on snorlax:
-1. Run its 4 sim tests in the arm test image (they need the flatbot model): see the PR.
-2. Launch the node standalone: `ros2 launch place_container place_container.launch.py
-   use_orchestrator:=false allow_execute:=true state_dir:=$HOME/.table_place`.
-3. Do `mark`, a dry-run `place`, then `place` with `"execute": true`. Empty gripper first, someone
-   on the e-stop.
-4. Compare its descent CSV with the Oct 26 runs (`plot_descent.py <csv>`).
+`mark` / `place` / `retreat` / `reset` onto the shared `self.arm`, with no changes to `self.arm`.
+**It placed on flatbot on 2026-10-29**, with an empty gripper and then with the container (spot
+0.84 m out, table z 0.196).
 
-Until it works there, this repo's `place_bowl.py` stays the version that is known to work.
+Running it on snorlax (clone in `~/place-container-dev`; don't touch `~/rammp-kitchen-capability-engines`,
+that's the lab's copy on someone's branch):
+1. Build the image: `make build CAP=place_container` (after a `git pull`).
+2. Start the node (terminal 1). The `cyclonedds.xml` mount is needed: the image's default config runs
+   out of slots on snorlax.
+   ```bash
+   docker run --rm -it --network host --ipc host -v $HOME/.place_container:/config/place_container \
+     -v $HOME/cyclonedds.xml:/cfg/cyclonedds.xml:ro -e CYCLONEDDS_URI=file:///cfg/cyclonedds.xml \
+     ghcr.io/rammp-org/rammp-kitchen-capability-engines/place_container:dev \
+     ros2 run place_container place_container_node --ros-args -p use_orchestrator:=false -p allow_execute:=true
+   ```
+3. Send actions from the host (terminal 2, after `source ~/RAMMP-table/env_snorlax.sh`):
+   ```bash
+   act() { ros2 action send_goal --feedback /place_container/execute_action \
+     rammp_orchestrator_interfaces/action/ExecuteAction "{engine_id: place_container, action_id: $1, params_json: '${2:-{\}}'}"; }
+   act mark; act place; act place '{"execute": true}'; act reset '{"execute": true}'
+   ```
+   The `arm` driver must be on (and teleop off) whenever an action runs. The spot has to be 0.70–1.10 m
+   from the base: `mark` prints the distance.
+
+Still to do: review a descent recording (does the hand jump up after the cancel on contact? the settle
+sag with the new gains), run the 4 sim tests in the arm test image, and get Swapnil's review of the PR.
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
