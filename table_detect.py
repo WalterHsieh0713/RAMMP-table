@@ -46,7 +46,7 @@ from scipy import ndimage
 # Placement defaults - change them here and both the CLI and the ROS node pick them up.
 BOWL_RADIUS = 0.055   # m, radius of the bowl (5.5 cm)
 MARGIN = 0.02         # m, gap kept between the bowl and objects on the table
-EDGE_MARGIN = 0.08    # m, gap kept between the bowl and the table edge
+EDGE_MARGIN = float(os.environ.get("TABLE_EDGE_MARGIN", 0.08))   # m, gap kept between the bowl and the table edge
 CELL_SIZE = 0.005     # m, top-down grid resolution (5 mm squares)
 # What counts as an object on the table: points this high above the plane (m) ...
 OBSTACLE_MIN_HEIGHT = float(os.environ.get("TABLE_OBSTACLE_MIN_HEIGHT", 0.02))
