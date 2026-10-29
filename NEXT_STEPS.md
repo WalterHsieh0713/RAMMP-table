@@ -1,4 +1,18 @@
-# What to do next (updated 2026-10-26)
+# What to do next (updated 2026-10-29)
+
+**The placing is moving to the lab's repo:** `capabilities/place_container` in
+rammp-org/rammp-kitchen-capability-engines, draft PR #22 (issue #7), branch
+`feature/7-place-container` on `WalterHsieh0713/rammp-kitchen-capability-engines`. It ports
+`mark` / `place` / `retreat` / `reset` onto the shared `self.arm`, but it has **not run on the arm yet**.
+First thing on snorlax:
+1. Run its 4 sim tests in the arm test image (they need the flatbot model): see the PR.
+2. Launch the node standalone: `ros2 launch place_container place_container.launch.py
+   use_orchestrator:=false allow_execute:=true state_dir:=$HOME/.table_place`.
+3. Do `mark`, a dry-run `place`, then `place` with `"execute": true`. Empty gripper first, someone
+   on the e-stop.
+4. Compare its descent CSV with the Oct 26 runs (`plot_descent.py <csv>`).
+
+Until it works there, this repo's `place_bowl.py` stays the version that is known to work.
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
