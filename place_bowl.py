@@ -919,7 +919,7 @@ def save_obstacles(depth_m, intr, result, R, t, model, q):
 
 
 def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic=None, color_topic=None,
-                min_height=None, max_plane_dist=None):
+                min_height=None, max_plane_dist=None, no_check=False):
     """Scan `frames` times at the scan pose, average the spots (outliers dropped), show the result
     and ask Confirm / Rescan / Cancel. Confirmed: saved to SPOT_FILE and returned as a dict, e.g.
       {"x": 0.851, "y": 0.094, "table_z": 0.132, "frame": "level", "spread_cm": 0.6, "n_used": 9,
@@ -1029,6 +1029,13 @@ def choose_spot(frames=10, period=0.2, window=True, depth_topic=None, info_topic
             it can't be used: the bowl must fit there in most frames, and be in reach."""
             if p_cam is None:
                 return None, "that isn't on the table plane"
+            if no_check:   # look --no-check: the person picking keeps the spot clear
+                base_pt = R @ p_cam + t
+                r = float(np.hypot(*base_pt[:2]))
+                if not rmin <= r <= rmax:
+                    print(f"NOTE: {r:.2f} m from the arm base, outside the reach {rmin:.2f}-{rmax:.2f}; "
+                          "the place plan decides")
+                return (base_pt, p_cam, float("nan")), None
             if not grids:
                 return None, "no free-space map of the table in these frames"
             clears = [grid_clearance(p_cam, g) for g in grids]
@@ -1111,10 +1118,12 @@ def look(args):
     record = choose_spot(frames=args.frames, period=args.period, window=not args.no_window,
                          depth_topic=args.depth_topic, info_topic=args.info_topic,
                          color_topic=args.color_topic, min_height=args.min_height,
-                         max_plane_dist=args.max_plane_dist)
+                         max_plane_dist=args.max_plane_dist, no_check=args.no_check)
     if record is None:
         sys.exit(1)
     print("Grip the bowl, then: python3 place_bowl.py place")
+    print("  or with place_container (rammp-kitchen-capability-engines):\n"
+          f"  act place '{{\"x\": {record['x']:.3f}, \"y\": {record['y']:.3f}, \"table_z\": {record['table_z']:.3f}}}'")
 
 
 # ---------------------------------------------------------------------------
@@ -1900,6 +1909,9 @@ def build_parser():
                         help="s between frames (default %(default).1f)")
     p_look.add_argument("--no-window", action="store_true",
                         help="confirm in the terminal instead of a window (the picture is still saved)")
+    p_look.add_argument("--no-check", action="store_true",
+                        help="a spot you pick (click, \"px U V\", \"at X Y\") is taken as it is: no check "
+                             "that the bowl fits there -- you keep it clear")
     # Defaults depend on TABLE_CAMERA (scene: table_detector_node.CAMERAS; wrist: TABLE_CAMERA_NS).
     p_look.add_argument("--depth-topic")
     p_look.add_argument("--info-topic")

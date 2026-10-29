@@ -176,7 +176,7 @@ def ask(img, can_confirm=True, window=True, title="bowl spot", allow_pick=False)
             print(f"(no window: {e}; asking here instead)")
     options = "[c]onfirm / [r]escan / [q]uit" if can_confirm else "[r]escan / [q]uit"
     if allow_pick:
-        options += ' / "at X Y" (choose the spot, m)'
+        options += ' / "at X Y" (choose the spot, m) / "px U V" (the depth image\'s pixel)'
     while True:
         try:
             answer = input(f"{options}? ").strip().lower()
@@ -195,6 +195,13 @@ def ask(img, can_confirm=True, window=True, title="bowl spot", allow_pick=False)
             except ValueError:
                 pass
             print("  at X Y: two numbers in metres, e.g.  at 0.80 0.10")
+        if allow_pick and len(words) == 3 and words[0] == "px":
+            # A click typed in: the pixel under the mouse in Foxglove's depth image panel (rotation 0)
+            try:
+                return "pick", (float(words[1]), float(words[2]))
+            except ValueError:
+                pass
+            print("  px U V: the pixel's column and row in the depth image, e.g.  px 320 240")
 
 
 def _ask_window(img, can_confirm, title, allow_pick=False):

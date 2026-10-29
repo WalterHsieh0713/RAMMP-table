@@ -194,6 +194,8 @@ def test_terminal_prompt_takes_a_spot():
         assert V.ask(None, window=False, allow_pick=True) == ("at", (0.80, 0.10))
         answers = iter(["at 0.8 0.1", "q"])                   # without allow_pick it's just ignored
         assert V.ask(None, window=False) == "cancel"
+        answers = iter(["px 229", "px 229 164"])              # a pixel typed in = a click there
+        assert V.ask(None, window=False, allow_pick=True) == ("pick", (229.0, 164.0))
     finally:
         del V.input
 
