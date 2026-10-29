@@ -53,6 +53,9 @@ OBSTACLE_MIN_HEIGHT = float(os.environ.get("TABLE_OBSTACLE_MIN_HEIGHT", 0.02))
 # ... at least this many in one grid cell. The scene camera's depth on the plain table is noisy at
 # ~1 m (flatbot, 2026-10-29): single points 1-2 cm up made yellow streaks across clear table.
 OBSTACLE_MIN_POINTS = int(os.environ.get("TABLE_OBSTACLE_MIN_POINTS", 3))
+# A point within this distance (m) of the fitted plane is tabletop. The scene camera's depth bends a
+# few cm off flat toward the corners of its view, which then drop out of the table.
+PLANE_TOL = float(os.environ.get("TABLE_PLANE_TOL", 0.02))
 # Holes in the seen tabletop up to this size (cm^2) that touch no object count as table; 0 = off.
 FILL_HOLES_CM2 = float(os.environ.get("TABLE_FILL_HOLES_CM2", 25.0))
 
@@ -179,12 +182,13 @@ def backproject(depth_m, fx, fy, cx, cy, stride=1, max_depth=3.0):
 # Step 2: find the table plane
 # ---------------------------------------------------------------------------
 
-def find_planes(points, max_planes=6, dist_thresh=0.02, min_inliers=1500, iterations=1000):
+def find_planes(points, max_planes=6, dist_thresh=None, min_inliers=1500, iterations=1000):
     """Peel off the biggest planes one at a time with RANSAC.
 
     Returns a list of (plane_model, inlier_indices) where plane_model is
     (a, b, c, d) for the plane a*x + b*y + c*z + d = 0.
     """
+    dist_thresh = PLANE_TOL if dist_thresh is None else dist_thresh
     remaining = np.arange(len(points))
     planes = []
     for _ in range(max_planes):
@@ -341,7 +345,7 @@ def view_center_on_plane(model, fallback):
 
 def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS,
                       margin=MARGIN, cell_size=CELL_SIZE, edge_margin=EDGE_MARGIN,
-                      surface_tol=0.02, obstacle_range=(OBSTACLE_MIN_HEIGHT, 0.40),
+                      surface_tol=None, obstacle_range=(OBSTACLE_MIN_HEIGHT, 0.40),
                       points=None, pixels=None, allowed=None):
     """The worker behind find_placement().
 
@@ -363,6 +367,7 @@ def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS
     ex, ey = plane_axes(normal)
 
     # Only count surface points that really are on the plane.
+    surface_tol = PLANE_TOL if surface_tol is None else surface_tol
     table_points = table_points[np.abs((table_points - origin) @ normal) <= surface_tol]
     if len(table_points) == 0:
         return None, "the table has no surface points", None
