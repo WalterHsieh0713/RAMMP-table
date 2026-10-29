@@ -38,6 +38,7 @@ Run on your own saved frame (e.g. from the robot's RealSense):
 """
 
 import argparse
+import os
 
 import numpy as np
 from scipy import ndimage
@@ -47,6 +48,11 @@ BOWL_RADIUS = 0.055   # m, radius of the bowl (5.5 cm)
 MARGIN = 0.02         # m, gap kept between the bowl and objects on the table
 EDGE_MARGIN = 0.08    # m, gap kept between the bowl and the table edge
 CELL_SIZE = 0.005     # m, top-down grid resolution (5 mm squares)
+# What counts as an object on the table: points this high above the plane (m) ...
+OBSTACLE_MIN_HEIGHT = float(os.environ.get("TABLE_OBSTACLE_MIN_HEIGHT", 0.02))
+# ... at least this many in one grid cell. The scene camera's depth on the plain table is noisy at
+# ~1 m (flatbot, 2026-10-29): single points 1-2 cm up made yellow streaks across clear table.
+OBSTACLE_MIN_POINTS = int(os.environ.get("TABLE_OBSTACLE_MIN_POINTS", 3))
 
 # Floor rejection - a plane that fails either check is never picked as the table.
 # At the scan pose the tabletop is ~0.49 m from the camera (distance along the plane
@@ -333,7 +339,7 @@ def view_center_on_plane(model, fallback):
 
 def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS,
                       margin=MARGIN, cell_size=CELL_SIZE, edge_margin=EDGE_MARGIN,
-                      surface_tol=0.02, obstacle_range=(0.01, 0.40),
+                      surface_tol=0.02, obstacle_range=(OBSTACLE_MIN_HEIGHT, 0.40),
                       points=None, pixels=None, allowed=None):
     """The worker behind find_placement().
 
@@ -381,8 +387,10 @@ def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS
     low, high = obstacle_range
     is_obstacle = ((ia >= 0) & (ia < na) & (ib >= 0) & (ib < nb)
                    & (height > low) & (height < high))
-    occupied = np.zeros((na, nb), dtype=bool)
-    occupied[ia[is_obstacle], ib[is_obstacle]] = True
+    counts = np.zeros((na, nb), dtype=np.intp)
+    np.add.at(counts, (ia[is_obstacle], ib[is_obstacle]), 1)
+    occupied = counts >= OBSTACLE_MIN_POINTS   # lone noisy points don't make an object
+    is_obstacle[is_obstacle] = occupied[ia[is_obstacle], ib[is_obstacle]]
     obstacle_mask = np.zeros(depth_m.shape, dtype=bool)
     obstacle_mask[pixels[is_obstacle, 0], pixels[is_obstacle, 1]] = True
 
