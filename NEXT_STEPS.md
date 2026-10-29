@@ -24,16 +24,38 @@ that's the lab's copy on someone's branch):
      rammp_orchestrator_interfaces/action/ExecuteAction "{engine_id: place_container, action_id: $1, params_json: '${2:-{\}}'}"; }
    act mark; act place; act place '{"execute": true}'; act reset '{"execute": true}'
    ```
-   The `arm` driver must be on (and teleop off) whenever an action runs. The spot has to be 0.70–1.10 m
-   from the base: `mark` prints the distance.
+   The `arm` driver must be on (and teleop off) whenever an action runs. Keep the spot **0.80–0.95 m**
+   from the base: closer, the line down can't reach the table. `mark` prints the distance.
+4. A spot from the camera:
+   - run `py place_bowl.py look --no-window --no-check`;
+   - type `px U V`, read from Foxglove's depth image (rotation 0°);
+   - type `c`, then use the `act place ...` line it prints.
 
-Still to do: review a descent recording (does the hand jump up after the cancel on contact? the settle
-sag with the new gains), run the 4 sim tests in the arm test image, and get Swapnil's review of the PR.
+### Next session (from `PROGRESS_2026-10-29.md`)
+1. [ ] **The gripper:** it stopped responding at the end of Oct 29 (frozen `/gripper_state`, setpoints
+       ignored). Restart the `arm` node; if that doesn't fix it, the lab's gripper reset or a power
+       cycle. The hand was left on the table.
+2. [ ] **Tell the lab:**
+   - the scene camera's transform is ~12° off in yaw (its spots are 3–12 cm short; 4-point check in
+     the Oct 29 notes, section 4);
+   - the arm sees the table 6.4° tilted. Put a level on the table: if it's level, flatbot's
+     `mount.yaml` may be off.
+3. [ ] **Until the camera is fixed,** place from `mark` (fingertips), or expect camera spots to land
+       short. Use the camera's `table_z` for camera spots: a mark's height only holds near the mark.
+4. [ ] **Review one descent recording:**
+   - does the hand jump up after the cancel on contact?
+   - how far does it sag in the settle with the new gains?
+5. [ ] **The PR:**
+   - run the 4 sim tests in the arm test image;
+   - mark PR #22 ready for Swapnil's review;
+   - tell him the example Dockerfile lacks `rosdep update`.
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
-`PROGRESS_2026-10-23.md` (choose the spot by clicking), **`PROGRESS_2026-10-26.md`** (flatbot / snorlax:
-placing at a marked spot works; setup, contact threshold, scene camera depth). Design:
+`PROGRESS_2026-10-23.md` (choose the spot by clicking), `PROGRESS_2026-10-26.md` (flatbot / snorlax:
+placing at a marked spot works; setup, contact threshold, scene camera depth),
+**`PROGRESS_2026-10-29.md`** (place_container in the lab's repo works on flatbot; camera detection
+settings, `look --no-check`, the camera transform check, the gripper failure). Design:
 `PLAN_2026-10-06_scene_camera.md`.
 
 Today's robot is **flatbot** (arm on a 30° mount), run from **snorlax**. Setup:
