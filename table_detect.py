@@ -53,6 +53,8 @@ OBSTACLE_MIN_HEIGHT = float(os.environ.get("TABLE_OBSTACLE_MIN_HEIGHT", 0.02))
 # ... at least this many in one grid cell. The scene camera's depth on the plain table is noisy at
 # ~1 m (flatbot, 2026-10-29): single points 1-2 cm up made yellow streaks across clear table.
 OBSTACLE_MIN_POINTS = int(os.environ.get("TABLE_OBSTACLE_MIN_POINTS", 3))
+# Holes in the seen tabletop up to this size (cm^2) that touch no object count as table; 0 = off.
+FILL_HOLES_CM2 = float(os.environ.get("TABLE_FILL_HOLES_CM2", 25.0))
 
 # Floor rejection - a plane that fails either check is never picked as the table.
 # At the scan pose the tabletop is ~0.49 m from the camera (distance along the plane
@@ -408,6 +410,17 @@ def _placement_search(depth_m, intrinsics, table_result, bowl_radius=BOWL_RADIUS
     #   filled in (closing first bridges tiny gaps so the outline stays one piece).
     table_region = ndimage.binary_fill_holes(ndimage.binary_closing(free, iterations=2))
     table_region |= free
+    # Small depth holes inside the tabletop count as table: the scene camera's depth on the plain
+    # table drops patches (flatbot, 2026-10-29). Not a hole touching an object: that is the object's
+    # shadow (never seen) or the dark edge of the object itself.
+    if FILL_HOLES_CM2 > 0:
+        holes = table_region & ~free & ~occupied
+        labels, n = ndimage.label(holes)
+        if n:
+            ids = np.arange(1, n + 1)
+            area = ndimage.sum(holes, labels, ids) * cell * cell * 1e4   # cm^2
+            near = ndimage.maximum(ndimage.binary_dilation(occupied, iterations=2), labels, ids)
+            free |= np.isin(labels, ids[(area <= FILL_HOLES_CM2) & (near == 0)])
     obstacle_cells = table_region & ~free
 
     # Distance from every cell to the nearest edge / obstacle cell.
