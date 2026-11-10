@@ -54,6 +54,29 @@ cuRobo (done), 10 runs from different starts with a success rate, UI integration
        `make check`, `make lint`. The Nov 10 tests (swing, back-off, approach split, arming) have
        never run.
 4. [ ] **Ask Swap** whether flatbot's planner volumes are the "new collision zones".
+5. [ ] **Make the backing-away smooth: one blended cuRobo motion from letting go back to the start.**
+       Cailyn (Slack, Nov 10): "it doesn't look particularly smooth backing away". I'd told her the
+       place uses cuRobo blending; that's true only for the carry/approach and the reset.
+   - **Now** (`node.py` `_place` after contact, `lower.py`): hold (`hold_goal` + `wait_still`) →
+     `let_go` (waits for the gripper ≤ 0.3) → `time.sleep(0.5)` → `sink` (1 cm drop: `hold_goal` +
+     `wait_still`) → `back_out` (`move_joints` in impedance through `plan_retreat`'s waypoints:
+     straight back, then the 60° swing, a sharp unblended corner between) → `wait_still` → place ends
+     in impedance. `reset` is a separate action (`exit_impedance`, then `go_to_joint_configs` up →
+     start). So: several stops, a corner, and a gap before the reset.
+   - **Plan:** after the gripper is open, ONE `go_to_joint_configs` (position mode, cuRobo, blended)
+     through: the drop's joints (`sink`'s `plan_descent` end) → `plan_retreat`'s waypoints, thinned
+     to every ~1–2 cm (straight part + swing) → straight up (`reset_moves`' "up") → the start joints
+     (`start.json`). Small blend radii near the container (~0.01 m; the table and container aren't
+     in cuRobo's world), `blend_radius_far` once up high, 0 at the start. The same trick as the
+     carry/approach (`_carry_joints`). The place then ends back at the start: no separate reset.
+   - Leave impedance first, without a jump: `exit_impedance` (position setpoint = current joints)
+     after the gripper opens; drop the 0.5 s sleep and the `wait_still`s in between.
+   - Keep the old path behind a parameter (e.g. `return_mode: blended | legacy`) for the first
+     test; the dry run checks the new legs with `_check_carry_joints`-style cuRobo plans.
+   - The PR should say why the lowering stays `move_joints` (it must stop on contact; AGENTS.md:
+     "when you keep a legacy move, say why").
+   - **Test Thursday, attended, before the 10 runs:** do the fingers leave the lip cleanly in
+     position mode (no drag), does the container stay put, any corner cut toward the container.
 
 **Thursday at the lab (~3 h; book 4–5):**
 1. [ ] Bring up, build, tests; tmux (Ethernet if possible).
