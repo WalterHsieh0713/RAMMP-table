@@ -1,61 +1,84 @@
-# What to do next (updated 2026-10-29)
+# What to do next (updated 2026-11-10)
 
-**The placing is moving to the lab's repo:** `capabilities/place_container` in
-rammp-org/rammp-kitchen-capability-engines, draft PR #22 (issue #7), branch
-`feature/7-place-container` on `WalterHsieh0713/rammp-kitchen-capability-engines`. It ports
-`mark` / `place` / `retreat` / `reset` onto the shared `self.arm`, with no changes to `self.arm`.
-**It placed on flatbot on 2026-10-29**, with an empty gripper and then with the container (spot
-0.84 m out, table z 0.196).
+**The placing lives in the lab's repo:** `capabilities/place_container` in
+rammp-org/rammp-kitchen-capability-engines, PR #22 (issue #7), branch `feature/7-place-container` on
+`WalterHsieh0713/rammp-kitchen-capability-engines` (last: `598cc97`, 2026-11-10).
+**On 2026-11-10 it placed the container on flatbot, start to finish, ~2x faster than before**
+(~30 s → ~15 s from carry to hand clear): one blended cuRobo carry down to 6 cm above the table, then
+the slow impedance lowering, drop 1 cm, back out (or swing out). Details: `PROGRESS_2026-11-10.md`.
 
-Running it on snorlax (clone in `~/place-container-dev`; don't touch `~/rammp-kitchen-capability-engines`,
-that's the lab's copy on someone's branch):
-1. Build the image: `make build CAP=place_container` (after a `git pull`).
-2. Start the node (terminal 1). The `cyclonedds.xml` mount is needed: the image's default config runs
-   out of slots on snorlax.
+**Deadline (Cailyn): EOD Thursday 2026-11-12** — collision zones, a rosbag every run, smooth with
+cuRobo (done), 10 runs from different starts with a success rate, UI integration (show every error).
+
+## Running it on snorlax (`ssh snorlax@snorlax.local`)
+- Clone in `~/place-container-dev`; don't touch `~/rammp-kitchen-capability-engines` (the lab's).
+- **Work inside tmux:** `tmux new -s place` (after a drop: `tmux attach -t place`). SSH dropped 3x on
+  Nov 10, each as the arm reset; snorlax's network stayed up, so it's the laptop Wi-Fi link. Try
+  Ethernet.
+- **Stack:** `sheppy up flatbot --manifest december_2026/sheppy-manifest.yaml` (the whole profile;
+  not `flatbot_empty_world`, not single nodes: the driver needs `arm_state_publisher`, the planner
+  the profile's chair/person volumes).
+1. Update the code: `git pull` in `~/place-container-dev` (or `scp` changed files from the laptop),
+   then `make build CAP=place_container`.
+2. **Window 0, the node** (the defaults are the Nov 10 tuned values; no extra `-p` needed):
    ```bash
    docker run --rm -it --network host --ipc host -v $HOME/.place_container:/config/place_container \
      -v $HOME/cyclonedds.xml:/cfg/cyclonedds.xml:ro -e CYCLONEDDS_URI=file:///cfg/cyclonedds.xml \
      ghcr.io/rammp-org/rammp-kitchen-capability-engines/place_container:dev \
      ros2 run place_container place_container_node --ros-args -p use_orchestrator:=false -p allow_execute:=true
    ```
-3. Send actions from the host (terminal 2, after `source ~/RAMMP-table/env_snorlax.sh`):
+3. **Window 1 (Ctrl-b c), actions** after `source ~/RAMMP-table/env_snorlax.sh`:
    ```bash
    act() { ros2 action send_goal --feedback /place_container/execute_action \
      rammp_orchestrator_interfaces/action/ExecuteAction "{engine_id: place_container, action_id: $1, params_json: '${2:-{\}}'}"; }
-   act mark; act place; act place '{"execute": true}'; act reset '{"execute": true}'
+   act mark                                   # fingertips on the spot, teleop off
+   act reset '{"execute": true, "empty": true}'
+   act place '{"execute": false}'             # dry run, container in the hand
+   act place '{"execute": true}'
+   act reset '{"execute": true, "empty": true}'
    ```
-   The `arm` driver must be on (and teleop off) whenever an action runs. Keep the spot **0.80–0.95 m**
-   from the base: closer, the line down can't reach the table. `mark` prints the distance.
-4. A spot from the camera:
-   - run `py place_bowl.py look --no-window --no-check`;
-   - type `px U V`, read from Foxglove's depth image (rotation 0°);
-   - type `c`, then use the `act place ...` line it prints.
+   Spots **~0.88–0.90 m** from the base (0.81–0.83 is borderline). A mark expires after 30 min.
+   **Don't use `allow_reconfigure`** on flatbot: the other posture's elbow goes into the person's lap.
+4. **If every goal is rejected:** `docker logs --tail 60 sheppy-arm 2>&1`. `ArmLink: faulted` →
+   `ros2 service call /clear_faults std_srvs/srv/Trigger`. Another owner → `/control_status`.
+5. **Recover a different arm posture** (empty hand): `act reset '{"execute": true, "empty": true, "big_turn": true}'`.
+   Reset refused inside the chair's padding: restart the node with `-p reset_mode:=legacy` once.
 
-### Next session (from `PROGRESS_2026-10-29.md`)
-1. [ ] **The gripper:** it stopped responding at the end of Oct 29 (frozen `/gripper_state`, setpoints
-       ignored). Restart the `arm` node; if that doesn't fix it, the lab's gripper reset or a power
-       cycle. The hand was left on the table.
-2. [ ] **Tell the lab:**
-   - the scene camera's transform is ~12° off in yaw (its spots are 3–12 cm short; 4-point check in
-     the Oct 29 notes, section 4);
-   - the arm sees the table 6.4° tilted. Put a level on the table: if it's level, flatbot's
-     `mount.yaml` may be off.
-3. [ ] **Until the camera is fixed,** place from `mark` (fingertips), or expect camera spots to land
-       short. Use the camera's `table_z` for camera spots: a mark's height only holds near the mark.
-4. [ ] **Review one descent recording:**
-   - does the hand jump up after the cancel on contact?
-   - how far does it sag in the settle with the new gains?
-5. [ ] **The PR:**
-   - run the 4 sim tests in the arm test image;
-   - mark PR #22 ready for Swapnil's review;
-   - tell him the example Dockerfile lacks `rosdep update`.
+## Checklist to EOD Thursday
+**Wednesday (no robot):**
+1. [ ] **A rosbag every run inside the capability** (as the fridge code; Cailyn's link): arm state,
+       gripper, the node's log, action feedback, errors. Today only the descent CSV and
+       `tools/run_trials.py` (untracked) record.
+2. [ ] **UI integration** (Guo's README, once on `dev`): at least every error message on the UI.
+3. [ ] **Tests on snorlax's Docker:** `make test-arm ARM_CMD='python3 -m pytest -q -p no:cacheprovider capabilities/place_container/test'`,
+       `make check`, `make lint`. The Nov 10 tests (swing, back-off, approach split, arming) have
+       never run.
+4. [ ] **Ask Swap** whether flatbot's planner volumes are the "new collision zones".
+
+**Thursday at the lab (~3 h; book 4–5):**
+1. [ ] Bring up, build, tests; tmux (Ethernet if possible).
+2. [ ] Mark at ~0.88–0.90 m.
+3. [ ] **10 runs from different start poses, a bag every run.** On a failure: note the error and the
+       bag, keep going. Copy every bag and `runs.csv` off the robot before leaving.
+4. [ ] UI check: force one error (e.g. a spot too close) and see it on the UI.
+5. [ ] Success rate + timings (`runs.csv` `duration_s`) → push, update PR #22, mark it ready.
+
+### Still open from Oct 29
+- [x] Gripper: worked all of Nov 10.
+- [x] Descent recording review: the hand rises only 0.18 cm after the contact cancel; the settle is
+      gone (`settle_s` 0).
+- [ ] Tell the lab: the scene camera's transform is ~12° off in yaw; the arm sees the table 6.4°
+      tilted (check with a level / flatbot's `mount.yaml`).
+- [ ] Tell Swapnil the example Dockerfile lacks `rosdep update`.
 
 History: `PROGRESS_2026-09-29.md`, `PROGRESS_2026-10-05.md`, `PROGRESS_2026-10-08.md`,
 `PROGRESS_2026-10-19.md` (impedance placing on the HERL chair works, `--here`),
 `PROGRESS_2026-10-23.md` (choose the spot by clicking), `PROGRESS_2026-10-26.md` (flatbot / snorlax:
 placing at a marked spot works; setup, contact threshold, scene camera depth),
-**`PROGRESS_2026-10-29.md`** (place_container in the lab's repo works on flatbot; camera detection
-settings, `look --no-check`, the camera transform check, the gripper failure). Design:
+`PROGRESS_2026-10-29.md` (place_container in the lab's repo works on flatbot; camera detection
+settings, `look --no-check`, the camera transform check, the gripper failure),
+**`PROGRESS_2026-11-10.md`** (fast, smooth place on flatbot; six fixes from the arm; SSH drops).
+Design:
 `PLAN_2026-10-06_scene_camera.md`.
 
 Today's robot is **flatbot** (arm on a 30° mount), run from **snorlax**. Setup:
