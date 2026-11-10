@@ -49,7 +49,14 @@ cuRobo (done), 10 runs from different starts with a success rate, UI integration
 1. [ ] **A rosbag every run inside the capability** (as the fridge code; Cailyn's link): arm state,
        gripper, the node's log, action feedback, errors. Today only the descent CSV and
        `tools/run_trials.py` (untracked) record.
-2. [ ] **UI integration** (Guo's README, once on `dev`): at least every error message on the UI.
+2. [~] **UI integration** — code done Nov 10 (`c1db1e7`, on top of #42 `feat/engine_update` merged into
+       the branch; merge `dev` once #42 lands): a panel with each phase + progress bar, every error
+       with an OK button (waits ≤ `ui_error_wait_s`), mock walk-through + `mock_fail` for a sim.
+   - [ ] **Ask Guo how to run the UI bridge** next to the orchestrator (the README doesn't say).
+   - [ ] **Try it in mock** with the orchestrator (`make run CAP=place_container MOCK=1`, not
+         `STANDALONE`, so it gets a session token): `place` (phases), then
+         `place '{"mock_fail": "lower"}'` (the error panel; press OK).
+   - [ ] Then on flatbot with the orchestrator + UI (today's runs were standalone: no panel).
 3. [ ] **Tests on snorlax's Docker:** `make test-arm ARM_CMD='python3 -m pytest -q -p no:cacheprovider capabilities/place_container/test'`,
        `make check`, `make lint`. The Nov 10 tests (swing, back-off, approach split, arming) have
        never run.
