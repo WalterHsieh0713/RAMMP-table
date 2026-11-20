@@ -1,7 +1,7 @@
 # What to do next (updated 2026-11-20)
 
 **The code:** `capabilities/place_container` in rammp-org/rammp-kitchen-capability-engines.
-Laptop branch `walter/dev-place` (from `dev`), last commit **`4a73f96`, not pushed**. Old PR: #33
+Branch `feature/7-place-container-reach` (fork), commit `4a73f96`, **draft PR #71** into `dev`. Merged before: #33
 (`feature/7-place-container`). **Robot: gen_1_5**, from snorlax, worktree `~/rammp-wt/walter-place`,
 image `place_container:walter`, data `~/.place_container_gen15`.
 **Where it stands:** places reliably across most of the table (10 of 11 on Nov 20); the UI works up
@@ -19,7 +19,7 @@ kitchen repo; state for whoever picks it up: `HANDOFF_place_container.md` there.
      (dry-run from those end poses first; find which check refuses and why);
    - re-run (0.80, 0.35) to confirm the after-sag force fix on the arm (Nov 20 03:05 false contact).
 3. [ ] **UI end to end** once the bridge is fixed: tap table → spot → Place here, and Use marked spot.
-4. [ ] **Push and PR** into `dev` (template sections; results with evidence; what wasn't tested).
+4. [ ] **Mark PR #71 ready for review** into `dev` (template sections; results with evidence; what wasn't tested).
        Before: `make check`, `make lint`, `make test-arm` (the model tests skip in the image).
 5. [ ] Fix the 4 failing tests in `test/test_plan.py` ("lower: the arm can only go down…";
        Swapnil asked on PR #33) — I want to do these myself.
